@@ -316,6 +316,49 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
       });
     }
   }
+   Future<void> _scanStudentNames() async {
+    try {
+      final img = await _picker.pickImage(source: ImageSource.camera);
+      if (img == null) return;
+
+      _showSnack('Extracting student names...', isSuccess: true);
+      
+      final processedFile = await ImageService.preprocessImage(img.path);
+      final inputImage = InputImage.fromFilePath(processedFile.path);
+      final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+      
+      final result = await recognizer.processImage(inputImage);
+      final cleanText = TextUtils.cleanOcrText(result.text);
+      
+      // Parse student names from the extracted text
+      List<String> extractedNames = cleanText.split(RegExp(r'[,|\n]'))
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty && e.length > 2) // Filter out very short strings
+          .toList();
+
+      setState(() {
+        for (var name in extractedNames) {
+          if (!_studentNamesList.contains(name)) {
+            _studentNamesList.add(name);
+          }
+        }
+        // Also add to global pages/text for record keeping
+        _pages.add(img);
+        _fullText = "$_fullText\n\n--- Student Names Scan ---\n$cleanText";
+        _saveDraft();
+      });
+
+      recognizer.close();
+      
+      if (extractedNames.isEmpty) {
+        _showSnack('No names detected. Please add manually.', isError: true);
+      } else {
+        _showSnack('Found ${extractedNames.length} name(s)!', isSuccess: true);
+      }
+    } catch (e) {
+      _showSnack('Error extracting names: $e', isError: true);
+    }
+  }
 
   Future<void> _saveLocal() async {
     if (_titleController.text.isEmpty) {
@@ -700,14 +743,56 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
   }
 
   // --- Widgets ---
+  
   Widget _buildStudentListInput() {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-             Expanded(child: TextField(controller: _studentEntryController, decoration: InputDecoration(labelText: 'Add Student Name', prefixIcon: const Icon(Icons.person_add), filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none)), onSubmitted: (_) => _addStudent())),
+             Expanded(child: TextField(
+               controller: _studentEntryController, 
+               decoration: InputDecoration(
+                 labelText: 'Add Student Name', 
+                 prefixIcon: const Icon(Icons.person_add), 
+                 filled: true, 
+                 fillColor: Colors.white, 
+                 border: OutlineInputBorder(
+                   borderRadius: BorderRadius.circular(12), 
+                   borderSide: BorderSide.none
+                 )
+               ), 
+               onSubmitted: (_) => _addStudent()
+             )),
              const SizedBox(width: 8),
-             FloatingActionButton.small(onPressed: _addStudent, backgroundColor: Colors.indigo, child: const Icon(Icons.add, color: Colors.white), heroTag: "add_student"),
+             // Manual Add Button
+             FloatingActionButton.small(
+               onPressed: _addStudent, 
+               backgroundColor: Colors.indigo, 
+               child: const Icon(Icons.add, color: Colors.white), 
+               heroTag: "add_student"
+             ),
+             const SizedBox(width: 8),
+             // NEW: Camera Scan Button
+             FloatingActionButton.small(
+               onPressed: _scanStudentNames, 
+               backgroundColor: Colors.green[700], 
+               child: const Icon(Icons.camera_alt, color: Colors.white), 
+               heroTag: "scan_students",
+               tooltip: "Scan Names from Photo"
+             ),
         ]),
-        if (_studentNamesList.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Wrap(spacing: 8, children: _studentNamesList.map((n) => Chip(label: Text(n), onDeleted: () => setState(() { _studentNamesList.remove(n); _saveDraft(); }))).toList())),
+        if (_studentNamesList.isNotEmpty) 
+          Padding(
+            padding: const EdgeInsets.only(top: 8), 
+            child: Wrap(
+              spacing: 8, 
+              children: _studentNamesList.map((n) => Chip(
+                label: Text(n), 
+                onDeleted: () => setState(() { 
+                  _studentNamesList.remove(n); 
+                  _saveDraft(); 
+                })
+              )).toList()
+            )
+          ),
     ]);
   }
 

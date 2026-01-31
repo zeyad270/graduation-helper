@@ -17,7 +17,7 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Graduation Project OCR',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.bdlue),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
       home: const OCRHomePage(),
