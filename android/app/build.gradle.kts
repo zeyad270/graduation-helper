@@ -30,15 +30,17 @@ android {
         versionName = flutter.versionName
     }
 
-   buildTypes {
-    release {
-        // ADDED: Disable minification
-        minifyEnabled false
-        shrinkResources false
-        
-        signingConfig signingConfigs.debug
+    buildTypes {
+        release {
+            // FIXED: Proper Kotlin syntax for build.gradle.kts
+            isMinifyEnabled = false
+            isShrinkResources = false
+            
+            // TODO: Add your own signing config for the release build.
+            // Signing with the debug keys for now, so `flutter run --release` works.
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
-}
 }
 
 flutter {

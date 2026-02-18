@@ -19,8 +19,12 @@ class OCRHomePage extends StatefulWidget {
   @override
   State<OCRHomePage> createState() => _OCRHomePageState();
 }
+class _OCRHomePageState extends State<OCRHomePage>
+    with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
 
-class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStateMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   // Navigation State
   late TabController _tabController;
   int _currentIndex = 0;
@@ -51,10 +55,15 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
-    _tabController.addListener(() {
-      setState(() => _currentIndex = _tabController.index);
+  _tabController = TabController(length: 3, vsync: this);
+_tabController.addListener(() {
+  if (_tabController.indexIsChanging) {
+    setState(() {
+      _currentIndex = _tabController.index;
     });
+  }
+});
+
 
     _loadProjects();
     _restoreDraft();
@@ -179,19 +188,52 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
     return result ?? false;
   }
 
+  // --- Image Source Selection Dialog ---
+  Future<ImageSource?> _showImageSourceDialog() async {
+    return await showDialog<ImageSource>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Choose Image Source'),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt, color: Colors.indigo, size: 32),
+              title: const Text('Camera', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text('Take a photo'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.photo_library, color: Colors.indigo, size: 32),
+              title: const Text('Gallery', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text('Choose from photos'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // --- 1. OCR Logic ---
   Future<void> _addPage(ImageSource source) async {
     final img = await _picker.pickImage(source: source);
     if (img != null) setState(() => _pages.add(img));
   }
 
-  // NEW FUNCTION: Scan and Append to specific field
+  // UPDATED: Scan and Append with Camera/Gallery choice
   Future<void> _scanAndAppend(TextEditingController controller) async {
+    // Show dialog to choose Camera or Gallery
+    final ImageSource? source = await _showImageSourceDialog();
+    if (source == null) return; // User cancelled
+
     try {
-      final img = await _picker.pickImage(source: ImageSource.camera);
+      final img = await _picker.pickImage(source: source);
       if (img == null) return;
 
-      _showSnack('Processing new page...', isSuccess: true);
+      _showSnack('Processing image...', isSuccess: true);
       
       final processedFile = await ImageService.preprocessImage(img.path);
       final inputImage = InputImage.fromFilePath(processedFile.path);
@@ -220,65 +262,93 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
     }
   }
 
-  Future<void> _runOcr() async {
-    if (_pages.isEmpty) {
-      _showSnack('Add at least one page first', isError: true);
-      return;
+Future<void> _runOcr() async {
+  if (_pages.isEmpty) {
+    _showSnack('Add at least one page first', isError: true);
+    return;
+  }
+
+  setState(() => _isProcessing = true);
+
+  final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+  StringBuffer buffer = StringBuffer();
+
+  try {
+    for (var page in _pages) {
+      final processedFile =
+          await ImageService.preprocessImage(page.path);
+
+      final inputImage =
+          InputImage.fromFilePath(processedFile.path);
+
+      final result =
+          await recognizer.processImage(inputImage);
+
+      buffer.writeln(
+          TextUtils.cleanOcrText(result.text));
     }
-    setState(() => _isProcessing = true);
-    
-    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-    StringBuffer buffer = StringBuffer();
-    
-    try {
-      for (var page in _pages) {
-        final processedFile = await ImageService.preprocessImage(page.path);
-        final inputImage = InputImage.fromFilePath(processedFile.path);
-        final result = await recognizer.processImage(inputImage);
-        buffer.writeln(TextUtils.cleanOcrText(result.text));
-      }
-      _fullText = buffer.toString();
-      _fillForms(_fullText);
-      _showSnack('OCR Complete! Forms auto-filled.', isSuccess: true);
-    } catch (e) {
-      _showSnack('OCR Error: $e', isError: true);
-    } finally {
-      recognizer.close();
+
+    _fullText = buffer.toString();
+
+    await _fillForms(_fullText);
+
+    _showSnack(
+      'OCR + AI Processing Complete!',
+      isSuccess: true,
+    );
+
+  } catch (e) {
+    _showSnack('OCR Error: $e', isError: true);
+  } finally {
+    recognizer.close();
+    if (mounted) {
       setState(() => _isProcessing = false);
     }
   }
+}
 
-  void _fillForms(String text) {
-    final fields = OcrService.extractFields(text);
-    setState(() {
-      if (fields['title']?.isNotEmpty == true) _titleController.text = fields['title']!;
-      // Note: We overwrite here because this is the main "Batch Scan". 
-      // Use the "+" button on the field for appending extra pages manually.
-      if (fields['abstract']?.isNotEmpty == true) _abstractController.text = fields['abstract']!;
-      if (fields['description']?.isNotEmpty == true) _descriptionController.text = fields['description']!;
-      if (fields['supervisor']?.isNotEmpty == true) _supervisorController.text = fields['supervisor']!;
-      if (fields['year']?.isNotEmpty == true) _yearController.text = fields['year']!;
-      if (fields['category']?.isNotEmpty == true) _categoryController.text = fields['category']!;
-      if (fields['technologies']?.isNotEmpty == true) _technologiesController.text = fields['technologies']!;
-      
-      if (fields.containsKey('extractedKeywords') && fields['extractedKeywords']!.isNotEmpty) {
-        _keywordsController.text = fields['extractedKeywords']!;
-      }
 
-      if (fields.containsKey('students') && fields['students']!.isNotEmpty) {
-        final rawStudents = fields['students']!;
-        List<String> extractedNames = rawStudents.split(RegExp(r'[,|\n]'))
-            .map((e) => e.trim())
-            .where((e) => e.isNotEmpty)
-            .toList();
+ Future<void> _fillForms(String text) async {
+  final fields = await OcrService.processOCR(text);
 
-        for (var name in extractedNames) {
-          if (!_studentNamesList.contains(name)) _studentNamesList.add(name);
-        }
-      }
-      _saveDraft();
-    });
-  }
+  if (!mounted) return;
+
+  setState(() {
+    String getField(String key) {
+    final v = fields[key];
+    if (v == null) return '';
+    if (v is String) return v;
+    if (v is Map && v.containsKey('value')) return v['value'] ?? '';
+    return '';
+    }
+
+    _titleController.text = getField('title');
+    _abstractController.text = getField('abstract');
+    _descriptionController.text = getField('description');
+    _supervisorController.text = getField('supervisor');
+    _yearController.text = getField('year');
+    _technologiesController.text = getField('technologies');
+    _keywordsController.text = getField('keywords');
+    _categoryController.text = getField('category');
+
+    final studentsRaw = getField('students');
+
+    if (studentsRaw.isNotEmpty) {
+      _studentNamesList = studentsRaw
+          .split(RegExp(r'[,|;]'))
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty && e.length > 2)
+          .toList();
+      print('[HOME] Students extracted: $_studentNamesList');
+    } else {
+      print('[HOME] No students found in OCR result');
+      _studentNamesList.clear();
+    }
+
+    _saveDraft();
+  });
+}
+
 
   // --- 2. Saving & Editing Logic ---
   void _startEditing(ProjectInfo project) {
@@ -316,9 +386,15 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
       });
     }
   }
-   Future<void> _scanStudentNames() async {
+
+  // UPDATED: Scan student names with Camera/Gallery choice
+  Future<void> _scanStudentNames() async {
+    // Show dialog to choose Camera or Gallery
+    final ImageSource? source = await _showImageSourceDialog();
+    if (source == null) return; // User cancelled
+
     try {
-      final img = await _picker.pickImage(source: ImageSource.camera);
+      final img = await _picker.pickImage(source: source);
       if (img == null) return;
 
       _showSnack('Extracting student names...', isSuccess: true);
@@ -460,6 +536,9 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
   // --- UI BUILD ---
   @override
   Widget build(BuildContext context) {
+      super.build(context);
+
+    
     final isEditing = _editingProjectId != null;
     final unsyncedCount = _projects.where((p) => !p.isSynced).length;
     
@@ -770,13 +849,13 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
                heroTag: "add_student"
              ),
              const SizedBox(width: 8),
-             // NEW: Camera Scan Button
+             // Camera/Gallery Scan Button
              FloatingActionButton.small(
                onPressed: _scanStudentNames, 
                backgroundColor: Colors.green[700], 
                child: const Icon(Icons.camera_alt, color: Colors.white), 
                heroTag: "scan_students",
-               tooltip: "Scan Names from Photo"
+               tooltip: "Scan Names"
              ),
         ]),
         if (_studentNamesList.isNotEmpty) 
@@ -800,7 +879,7 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
   
   Widget _buildBigButton(IconData icon, String label, VoidCallback onTap) => InkWell(onTap: onTap, borderRadius: BorderRadius.circular(12), child: Container(padding: const EdgeInsets.symmetric(vertical: 16), decoration: BoxDecoration(border: Border.all(color: Colors.grey[300]!), borderRadius: BorderRadius.circular(12)), child: Column(children: [Icon(icon, size: 32, color: Colors.indigo[400]), const SizedBox(height: 8), Text(label, style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey[800]))])));
   
-  // MODIFIED: Added enableScan and suffixIcon logic
+  // UPDATED: Scan icon now shows dialog for Camera/Gallery choice
   Widget _buildInput(TextEditingController c, String label, IconData icon, {int maxLines = 1, bool enableScan = false}) => Padding(
     padding: const EdgeInsets.only(bottom: 16), 
     child: TextField(
@@ -809,9 +888,9 @@ class _OCRHomePageState extends State<OCRHomePage> with SingleTickerProviderStat
       decoration: InputDecoration(
         labelText: label, 
         prefixIcon: Icon(icon, size: 22, color: Colors.grey[500]),
-        // The Magic Button:
+        // The Magic Button - now with Camera/Gallery dialog:
         suffixIcon: enableScan ? IconButton(
-          icon: const Icon(Icons.playlist_add, color: Colors.indigo), 
+          icon: const Icon(Icons.add_a_photo, color: Colors.indigo), 
           tooltip: "Scan & Append Text",
           onPressed: () => _scanAndAppend(c),
         ) : null,
