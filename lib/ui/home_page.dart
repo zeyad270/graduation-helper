@@ -34,6 +34,7 @@ class _OCRHomePageState extends State<OCRHomePage>
   final List<XFile> _pages = [];
   String _fullText = '';
   bool _isProcessing = false;
+  bool _isFillingAll = false; // <-- new: tracks batch fill state
   List<ProjectInfo> _projects = [];
   int? _editingProjectId;
 
@@ -169,7 +170,6 @@ class _OCRHomePageState extends State<OCRHomePage>
       'This will permanently delete all saved projects from the device.',
     );
     if (confirmed) {
-      // Loop delete to avoid static method issues
       for (var p in _projects) {
         if (p.id != null) {
           await DatabaseService.deleteProject(p.id!);
@@ -247,21 +247,17 @@ class _OCRHomePageState extends State<OCRHomePage>
   // --- 1. OCR Logic ---
   Future<void> _addPage(ImageSource source) async {
     if (source == ImageSource.camera) {
-      // Camera: single photo as before
       final img = await _picker.pickImage(source: ImageSource.camera);
       if (img != null) setState(() => _pages.add(img));
     } else {
-      // Gallery: allow selecting multiple images
       final images = await _picker.pickMultiImage();
       if (images.isNotEmpty) setState(() => _pages.addAll(images));
     }
   }
 
-  // UPDATED: Scan and Append with Camera/Gallery choice
   Future<void> _scanAndAppend(TextEditingController controller) async {
-    // Show dialog to choose Camera or Gallery
     final ImageSource? source = await _showImageSourceDialog();
-    if (source == null) return; // User cancelled
+    if (source == null) return;
 
     try {
       final img = await _picker.pickImage(source: source);
@@ -277,14 +273,11 @@ class _OCRHomePageState extends State<OCRHomePage>
       final cleanText = TextUtils.cleanOcrText(result.text);
 
       setState(() {
-        // Append with a newline if text already exists
         if (controller.text.isNotEmpty) {
           controller.text = "${controller.text}\n\n$cleanText";
         } else {
           controller.text = cleanText;
         }
-
-        // Also add to global pages/text for record keeping
         _pages.add(img);
         _fullText = "${_fullText}\n\n--- Appended Page ---\n$cleanText";
       });
@@ -296,6 +289,94 @@ class _OCRHomePageState extends State<OCRHomePage>
     }
   }
 
+  // ─────────────────────────────────────────────
+  // BATCH FILL: one request fills ALL fields
+  // ─────────────────────────────────────────────
+  Future<void> _fillAllFieldsFromOcr() async {
+    if (_fullText.isEmpty) {
+      _showSnack('No scanned text available. Run OCR first.', isError: true);
+      return;
+    }
+
+    setState(() => _isFillingAll = true);
+    _showSnack('Filling all fields with AI (1 request)...', isSuccess: true);
+
+    try {
+      final fields = await OcrService.extractAllFields(_fullText);
+
+      if (fields.isEmpty) {
+        _showSnack(
+          'AI could not extract fields. Try scanning again.',
+          isError: true,
+        );
+        return;
+      }
+
+      setState(() {
+        if (fields['title']?.isNotEmpty == true) {
+          _titleController.text = fields['title']!;
+        }
+        if (fields['supervisor']?.isNotEmpty == true) {
+          _supervisorController.text = fields['supervisor']!;
+        }
+        if (fields['year']?.isNotEmpty == true) {
+          _yearController.text = fields['year']!;
+        }
+        if (fields['category']?.isNotEmpty == true) {
+          _categoryController.text = fields['category']!;
+        }
+        if (fields['technologies']?.isNotEmpty == true) {
+          _technologiesController.text = fields['technologies']!;
+        }
+        if (fields['keywords']?.isNotEmpty == true) {
+          _keywordsController.text = fields['keywords']!;
+        }
+        if (fields['abstract']?.isNotEmpty == true) {
+          _abstractController.text = fields['abstract']!;
+        }
+        if (fields['description']?.isNotEmpty == true) {
+          _descriptionController.text = fields['description']!;
+        }
+
+        // Handle students
+        final studentsRaw = fields['students'] ?? '';
+        if (studentsRaw.isNotEmpty) {
+          final parsed = studentsRaw
+              .split(RegExp(r'[,|;]'))
+              .map((e) => e.trim())
+              .where((e) => e.isNotEmpty && e.length > 2)
+              .toList();
+          if (parsed.isNotEmpty) {
+            _studentNamesList = parsed;
+          }
+        }
+
+        _saveDraft();
+      });
+
+      // Count how many fields were actually filled
+      final filledCount =
+          [
+            fields['title'],
+            fields['supervisor'],
+            fields['year'],
+            fields['category'],
+            fields['technologies'],
+            fields['keywords'],
+            fields['abstract'],
+            fields['description'],
+          ].where((v) => v != null && v.isNotEmpty).length +
+          (_studentNamesList.isNotEmpty ? 1 : 0);
+
+      _showSnack('✅ Filled $filledCount fields in 1 request!', isSuccess: true);
+    } catch (e) {
+      _showSnack('Error: $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _isFillingAll = false);
+    }
+  }
+
+  // Single-field fill (still available as override/fallback)
   Future<void> _fillFieldFromOcr(
     TextEditingController controller,
     String fieldName,
@@ -342,11 +423,8 @@ class _OCRHomePageState extends State<OCRHomePage>
     try {
       for (var page in _pages) {
         final processedFile = await ImageService.preprocessImage(page.path);
-
         final inputImage = InputImage.fromFilePath(processedFile.path);
-
         final result = await recognizer.processImage(inputImage);
-
         buffer.writeln(TextUtils.cleanOcrText(result.text));
       }
 
@@ -359,9 +437,7 @@ class _OCRHomePageState extends State<OCRHomePage>
       _showSnack('OCR Error: $e', isError: true);
     } finally {
       recognizer.close();
-      if (mounted) {
-        setState(() => _isProcessing = false);
-      }
+      if (mounted) setState(() => _isProcessing = false);
     }
   }
 
@@ -389,16 +465,13 @@ class _OCRHomePageState extends State<OCRHomePage>
       _categoryController.text = getField('category');
 
       final studentsRaw = getField('students');
-
       if (studentsRaw.isNotEmpty) {
         _studentNamesList = studentsRaw
             .split(RegExp(r'[,|;]'))
             .map((e) => e.trim())
             .where((e) => e.isNotEmpty && e.length > 2)
             .toList();
-        print('[HOME] Students extracted: $_studentNamesList');
       } else {
-        print('[HOME] No students found in OCR result');
         _studentNamesList.clear();
       }
 
@@ -421,7 +494,7 @@ class _OCRHomePageState extends State<OCRHomePage>
       _yearController.text = project.year;
       _fullText = project.rawOcrText;
       _pages.clear();
-      _tabController.animateTo(0); // Go to Form
+      _tabController.animateTo(0);
     });
   }
 
@@ -443,11 +516,9 @@ class _OCRHomePageState extends State<OCRHomePage>
     }
   }
 
-  // UPDATED: Scan student names with Camera/Gallery choice
   Future<void> _scanStudentNames() async {
-    // Show dialog to choose Camera or Gallery
     final ImageSource? source = await _showImageSourceDialog();
-    if (source == null) return; // User cancelled
+    if (source == null) return;
 
     try {
       final img = await _picker.pickImage(source: source);
@@ -462,13 +533,10 @@ class _OCRHomePageState extends State<OCRHomePage>
       final result = await recognizer.processImage(inputImage);
       final cleanText = TextUtils.cleanOcrText(result.text);
 
-      // Parse student names from the extracted text
       List<String> extractedNames = cleanText
           .split(RegExp(r'[,|\n]'))
           .map((e) => e.trim())
-          .where(
-            (e) => e.isNotEmpty && e.length > 2,
-          ) // Filter out very short strings
+          .where((e) => e.isNotEmpty && e.length > 2)
           .toList();
 
       setState(() {
@@ -477,7 +545,6 @@ class _OCRHomePageState extends State<OCRHomePage>
             _studentNamesList.add(name);
           }
         }
-        // Also add to global pages/text for record keeping
         _pages.add(img);
         _fullText = "$_fullText\n\n--- Student Names Scan ---\n$cleanText";
         _saveDraft();
@@ -534,7 +601,7 @@ class _OCRHomePageState extends State<OCRHomePage>
 
     _clearForm();
     _loadProjects();
-    _tabController.animateTo(2); // Go to Projects Tab
+    _tabController.animateTo(2);
   }
 
   void _clearForm() {
@@ -772,6 +839,7 @@ class _OCRHomePageState extends State<OCRHomePage>
                         ),
                       ),
                     const SizedBox(height: 12),
+                    // Extract Text button
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
@@ -802,7 +870,106 @@ class _OCRHomePageState extends State<OCRHomePage>
                 ),
               ),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 12),
+
+            // ─────────────────────────────────────────────
+            // FILL ALL FIELDS BUTTON (1 AI request for everything)
+            // ─────────────────────────────────────────────
+            if (_fullText.isNotEmpty)
+              Card(
+                elevation: 3,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                color: Colors.indigo[50],
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.bolt, color: Colors.indigo[700], size: 20),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Smart Fill',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                              color: Colors.indigo[900],
+                            ),
+                          ),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.green[700],
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Text(
+                              '1 request',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Fill all fields at once using a single AI call — saves your daily quota.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.indigo[700],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _isFillingAll
+                              ? null
+                              : _fillAllFieldsFromOcr,
+                          icon: _isFillingAll
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.auto_fix_high),
+                          label: Text(
+                            _isFillingAll
+                                ? 'Filling all fields...'
+                                : 'Fill All Fields (AI)',
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.indigo[700],
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 13),
+                            textStyle: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            const SizedBox(height: 12),
           ],
 
           _buildSectionHeader('2. Details'),
@@ -922,7 +1089,6 @@ class _OCRHomePageState extends State<OCRHomePage>
             ],
           ),
 
-          // Helper Buttons (Now Appending)
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -1124,21 +1290,19 @@ class _OCRHomePageState extends State<OCRHomePage>
               ),
             ),
             const SizedBox(width: 8),
-            // Manual Add Button
             FloatingActionButton.small(
               onPressed: _addStudent,
               backgroundColor: Colors.indigo,
-              child: const Icon(Icons.add, color: Colors.white),
               heroTag: "add_student",
+              child: const Icon(Icons.add, color: Colors.white),
             ),
             const SizedBox(width: 8),
-            // Camera/Gallery Scan Button
             FloatingActionButton.small(
               onPressed: _scanStudentNames,
               backgroundColor: Colors.green[700],
-              child: const Icon(Icons.camera_alt, color: Colors.white),
               heroTag: "scan_students",
               tooltip: "Scan Names",
+              child: const Icon(Icons.camera_alt, color: Colors.white),
             ),
           ],
         ),
@@ -1202,7 +1366,6 @@ class _OCRHomePageState extends State<OCRHomePage>
         ),
       );
 
-  // UPDATED: Scan icon now shows dialog for Camera/Gallery choice
   Widget _buildInput(
     TextEditingController c,
     String label,
@@ -1218,10 +1381,11 @@ class _OCRHomePageState extends State<OCRHomePage>
       decoration: InputDecoration(
         labelText: label,
         prefixIcon: Icon(icon, size: 22, color: Colors.grey[500]),
+        // Individual field buttons still available as override
         suffixIcon: enableScan
             ? IconButton(
                 icon: const Icon(Icons.auto_awesome, color: Colors.indigo),
-                tooltip: "Fill from scanned text",
+                tooltip: "Re-fill this field from scanned text",
                 onPressed: () => _fillFieldFromOcr(c, fieldKey),
               )
             : null,
@@ -1234,6 +1398,7 @@ class _OCRHomePageState extends State<OCRHomePage>
       ),
     ),
   );
+
   Widget _buildRowInputs(
     TextEditingController c1,
     String l1,

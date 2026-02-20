@@ -243,6 +243,148 @@ $rawText
     }
   }
 
+  // ============================
+  // BATCH EXTRACTION (1 request = all fields)
+  // ============================
+
+  /// Extracts ALL fields in ONE single API call.
+  /// Use this to fill the entire form with one request instead of one per field button.
+  /// Returns a Map<String, String> with keys:
+  ///   title, students, supervisor, year, category, technologies, keywords, abstract, description
+  static Future<Map<String, String>> extractAllFields(String rawText) async {
+    try {
+      final prompt =
+          '''
+Extract the following sections from this document text and return ONLY valid JSON.
+
+SECTIONS TO EXTRACT:
+1. abstract    - Full abstract section. Remove "Abstract:" label and page numbers from end.
+2. description - Full description/project description section. Remove label and page numbers.
+3. technologies - Technologies/tools used, comma-separated list.
+4. keywords    - Keywords if explicitly listed with "Keywords:" label, else "". Remove the label.
+5. title       - Project title. Remove any "Title:" prefix.
+6. supervisor  - Supervisor full name with title (Dr., Prof., etc.)
+7. year        - 4-digit submission/project year only (e.g. "2024")
+8. students    - ALL student full names, comma-separated. Look for numbered lists like "1- Full Name". Include complete names.
+9. category    - ONE of: Medical, Education, Finance, E-Commerce, Social Media, Entertainment, Transportation, Smart Agriculture, IoT/Smart Home, Manufacturing, Other
+
+RULES:
+- Return ONLY the JSON object — no markdown, no backticks, no extra text
+- All string values must be on a single line (no line breaks inside strings)
+- Close all quotes and braces — JSON must be complete and valid
+- If a section is not found, use ""
+- Do NOT invent or hallucinate data
+- Remove label words from the START of values (Abstract:, Description:, Title:, etc.)
+- Remove page references from the END of values (Page 4, pg. 87, etc.)
+
+EXAMPLE OUTPUT:
+{"title":"Smart Healthcare System","students":"Ahmed Hassan Ali, Sara Ibrahim Khalil","supervisor":"Dr. Ahmed Shalaby","year":"2024","category":"Medical","technologies":"Flutter, Firebase","keywords":"healthcare, AI","abstract":"This project addresses critical gaps...","description":"A comprehensive system designed to..."}
+
+Document text:
+$rawText
+
+RETURN ONLY THE COMPLETE JSON OBJECT.
+''';
+
+      print('[OCR] 🚀 Batch extracting ALL fields in one request...');
+
+      final decoded = await _geminiRequest(
+        modelPath: 'models/gemini-2.5-flash',
+        body: {
+          'contents': [
+            {
+              'parts': [
+                {'text': prompt},
+              ],
+            },
+          ],
+          'generationConfig': {
+            'temperature': 0.0,
+            'maxOutputTokens': 4096,
+            'topP': 0.95,
+          },
+        },
+        timeoutSeconds: 30,
+      );
+
+      if (decoded == null) {
+        print('[OCR] Batch extraction failed - no response');
+        return {};
+      }
+
+      if (decoded['candidates'] == null || decoded['candidates'].isEmpty) {
+        print('[OCR] Batch extraction - no candidates');
+        return {};
+      }
+
+      final text =
+          decoded['candidates'][0]['content']['parts'][0]['text'] as String;
+      print('[OCR] ===== BATCH EXTRACTION RESPONSE =====');
+      print(text);
+      print('[OCR] ===== END BATCH RESPONSE =====');
+
+      String cleaned = text
+          .replaceAll('```json', '')
+          .replaceAll('```', '')
+          .trim();
+
+      cleaned = _fixIncompleteJson(cleaned);
+      cleaned = _fixMultilineJsonStrings(cleaned);
+
+      final jsonMatch = RegExp(
+        r'\{[\s\S]*\}',
+        dotAll: true,
+      ).firstMatch(cleaned);
+      if (jsonMatch != null) cleaned = jsonMatch.group(0)!;
+
+      final Map<String, dynamic> jsonData = jsonDecode(cleaned);
+      final Map<String, String> result = {};
+
+      const fieldKeys = [
+        'title',
+        'students',
+        'supervisor',
+        'year',
+        'category',
+        'technologies',
+        'keywords',
+        'abstract',
+        'description',
+      ];
+
+      for (final key in fieldKeys) {
+        dynamic raw = jsonData[key];
+        String value = '';
+
+        if (raw != null) {
+          value = raw is List
+              ? raw.map((e) => e.toString()).join(', ').trim()
+              : raw.toString().trim();
+        }
+
+        if (key == 'abstract' || key == 'description') {
+          value = _cleanAbstractOrDescription(value);
+        }
+        if (key == 'keywords') {
+          value = _cleanKeywords(value);
+        }
+
+        result[key] = value;
+        print(
+          '[OCR] Batch [$key]: "${value.length > 80 ? "${value.substring(0, 80)}..." : value}"',
+        );
+      }
+
+      print(
+        '[OCR] ✅ Batch extraction complete — ${result.length} fields filled',
+      );
+      return result;
+    } catch (e) {
+      print('[OCR] Batch extraction error: $e');
+      return {};
+    }
+  }
+
   static Future<Map<String, dynamic>> processOCR(String rawText) async {
     print('[OCR] ===== Starting OCR Processing =====');
 
