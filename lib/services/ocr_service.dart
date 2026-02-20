@@ -5,7 +5,8 @@ import 'package:http/http.dart' as http;
 class OcrService {
   // ⚠️ REPLACE THIS WITH YOUR ACTUAL GEMINI API KEY
   // Get your key from: https://aistudio.google.com/app/apikey
-  static const String GEMINI_API_KEY = 'AIzaSyAE9GP-Z-hcvsurQ3pSC1vUgE-5APKsPqs';
+  static const String GEMINI_API_KEY =
+      'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8';
 
   // ============================
   // MAIN PUBLIC API - Use this in your app
@@ -13,7 +14,7 @@ class OcrService {
 
   /// Complete OCR pipeline: Image → Text Extraction → Data Extraction
   /// This is the main method to use in your app
-  /// 
+  ///
   /// @param base64Image - Base64 encoded image string
   /// @param fallbackOcrText - Optional: If you have text from another OCR engine, pass it as fallback
   /// @return Map with extracted fields (title, students, supervisor, year, etc.)
@@ -22,38 +23,155 @@ class OcrService {
     String? fallbackOcrText,
   }) async {
     print('[OCR] ===== Starting Image OCR Processing =====');
-    
+
     // Step 1: Extract text using Gemini Vision (best quality)
     String extractedText = await _performGeminiVisionOCR(base64Image);
-    
+
     // Step 2: Fallback to provided OCR text if Gemini Vision failed
-    if (extractedText.isEmpty && fallbackOcrText != null && fallbackOcrText.isNotEmpty) {
+    if (extractedText.isEmpty &&
+        fallbackOcrText != null &&
+        fallbackOcrText.isNotEmpty) {
       print('[OCR] Using fallback OCR text');
       extractedText = fallbackOcrText;
     }
-    
+
     // Step 3: If we still don't have text, return empty result
     if (extractedText.isEmpty) {
       print('[OCR] ERROR: No text could be extracted from image');
       return _createEmptyResult();
     }
-    
+
     // Step 4: Process the extracted text to get structured data
     return await processOCR(extractedText);
+  }
+
+  /// Extracts a single specific field from OCR text using a focused Gemini call
+  static Future<String> extractSingleField(
+    String rawText,
+    String fieldName,
+  ) async {
+    try {
+      if (GEMINI_API_KEY == 'YOUR_API_KEY_HERE' || GEMINI_API_KEY.isEmpty) {
+        return '';
+      }
+
+      final url = Uri.parse(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY",
+      );
+
+      final fieldInstructions = {
+        'abstract': '''
+Extract the ABSTRACT section from this document.
+- Find the section labeled "Abstract" or "Abstract:"
+- Extract ALL of its content completely
+- Remove the word "Abstract" or "Abstract:" from the start
+- Remove any page numbers from the end
+- Return only the clean abstract text
+''',
+        'description': '''
+Extract the DESCRIPTION or PROJECT DESCRIPTION section from this document.
+- Find the section labeled "Description", "Project Description", or "Overview"
+- Extract ALL of its content completely
+- Remove the label word from the start
+- Remove any page numbers from the end
+- Return only the clean description text
+''',
+        'technologies': '''
+Extract the TECHNOLOGIES or TOOLS used in this project.
+- Look for labels like "Technologies:", "Tools:", "Tech Stack:", "Built with:"
+- Return as a comma-separated list
+- Example: "Flutter, Firebase, Python, TensorFlow"
+- Return only the technology names, nothing else
+''',
+        'keywords': '''
+Extract the KEYWORDS from this document.
+- Look for a section labeled "Keywords:", "Key Words:", or "Index Terms:"
+- Return as a comma-separated list
+- Remove the "Keywords:" label itself
+- Return only the keyword terms
+''',
+      };
+
+      final instruction =
+          fieldInstructions[fieldName] ??
+          'Extract the $fieldName field from this document.';
+
+      final prompt =
+          '''
+$instruction
+
+RULES:
+- Return ONLY the extracted text content, nothing else
+- No explanations, no labels, no JSON
+- If the section is not found, return exactly: NOT_FOUND
+- Be thorough and extract the COMPLETE content of the section
+
+Document text:
+$rawText
+''';
+
+      print('[OCR] Extracting single field: $fieldName');
+
+      final response = await http
+          .post(
+            url,
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({
+              "contents": [
+                {
+                  "parts": [
+                    {"text": prompt},
+                  ],
+                },
+              ],
+              "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+
+        if (decoded["candidates"] == null || decoded["candidates"].isEmpty) {
+          return '';
+        }
+
+        final text =
+            decoded["candidates"][0]["content"]["parts"][0]["text"] as String;
+
+        if (text.trim() == 'NOT_FOUND') {
+          print('[OCR] Field $fieldName not found in text');
+          return '';
+        }
+
+        print(
+          '[OCR] Extracted $fieldName: "${text.substring(0, text.length.clamp(0, 100))}..."',
+        );
+        return text.trim();
+      } else {
+        print('[OCR] Single field extraction error: ${response.statusCode}');
+        return '';
+      }
+    } catch (e) {
+      print('[OCR] extractSingleField error: $e');
+      return '';
+    }
   }
 
   /// Process OCR text (legacy method for backward compatibility)
   /// Use extractFromImage() for new implementations
   static Future<Map<String, dynamic>> processOCR(String rawText) async {
     print('[OCR] ===== Starting OCR Processing =====');
-    
+
     // Preprocess OCR text to fix common issues
     String cleanedText = _preprocessOcrText(rawText);
     print('[OCR] Text preprocessing complete');
-    
+
     final regexData = _extractHeuristically(cleanedText);
-    print('[OCR] Heuristic students found: "${regexData['students']?['value'] ?? ""}"');
-    
+    print(
+      '[OCR] Heuristic students found: "${regexData['students']?['value'] ?? ""}"',
+    );
+
     final aiData = await _extractWithGemini(cleanedText);
     print('[OCR] AI students found: "${aiData['students'] ?? ""}"');
 
@@ -105,7 +223,7 @@ Return ONLY the raw extracted text with original line breaks, nothing else.
 """;
 
       print('[OCR] Calling Gemini Vision API...');
-      
+
       final response = await http
           .post(
             url,
@@ -118,16 +236,13 @@ Return ONLY the raw extracted text with original line breaks, nothing else.
                     {
                       "inline_data": {
                         "mime_type": "image/jpeg",
-                        "data": base64Image
-                      }
-                    }
-                  ]
-                }
+                        "data": base64Image,
+                      },
+                    },
+                  ],
+                },
               ],
-              "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 4096,
-              }
+              "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096},
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -146,15 +261,17 @@ Return ONLY the raw extracted text with original line breaks, nothing else.
         print('[OCR] ===== GEMINI VISION EXTRACTED TEXT =====');
         print(text);
         print('[OCR] ===== END EXTRACTED TEXT (${text.length} chars) =====');
-        
+
         return text;
       } else {
-        print('[OCR] Gemini Vision Error: ${response.statusCode} - ${response.body}');
+        print(
+          '[OCR] Gemini Vision Error: ${response.statusCode} - ${response.body}',
+        );
       }
     } catch (e) {
       print('[OCR] Gemini Vision exception: $e');
     }
-    
+
     return '';
   }
 
@@ -165,7 +282,9 @@ Return ONLY the raw extracted text with original line breaks, nothing else.
   static Future<Map<String, dynamic>> _extractWithGemini(String rawText) async {
     try {
       if (GEMINI_API_KEY == 'YOUR_API_KEY_HERE' || GEMINI_API_KEY.isEmpty) {
-        print('[OCR] ⚠️ Gemini API key not configured - using regex fallback only');
+        print(
+          '[OCR] ⚠️ Gemini API key not configured - using regex fallback only',
+        );
         return {};
       }
 
@@ -173,7 +292,8 @@ Return ONLY the raw extracted text with original line breaks, nothing else.
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY",
       );
 
-      final prompt = """
+      final prompt =
+          """
 Extract information from this OCR text and return ONLY valid, parseable JSON.
 
 CRITICAL JSON FORMATTING RULES (MUST FOLLOW EXACTLY):
@@ -233,15 +353,15 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
                   "contents": [
                     {
                       "parts": [
-                        {"text": prompt}
-                      ]
-                    }
+                        {"text": prompt},
+                      ],
+                    },
                   ],
                   "generationConfig": {
                     "temperature": 0.0,
                     "maxOutputTokens": 2048,
                     "topP": 0.95,
-                  }
+                  },
                 }),
               )
               .timeout(const Duration(seconds: 20));
@@ -251,7 +371,8 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
           if (response.statusCode == 200) {
             final decoded = jsonDecode(response.body);
 
-            if (decoded["candidates"] == null || decoded["candidates"].isEmpty) {
+            if (decoded["candidates"] == null ||
+                decoded["candidates"].isEmpty) {
               print('[OCR] No candidates in response');
               return {};
             }
@@ -265,14 +386,17 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
               }
             }
 
-            final text = decoded["candidates"][0]["content"]["parts"][0]["text"];
+            final text =
+                decoded["candidates"][0]["content"]["parts"][0]["text"];
             print('[OCR] ===== GEMINI EXTRACTION RESPONSE =====');
             print(text);
             print('[OCR] ===== END RESPONSE =====');
 
             return _validateAndSanitize(text, rawText);
           } else {
-            print('[OCR] Gemini Error: ${response.statusCode} - ${response.body}');
+            print(
+              '[OCR] Gemini Error: ${response.statusCode} - ${response.body}',
+            );
           }
         } catch (e) {
           print('[OCR] Attempt ${attempt + 1} failed: $e');
@@ -295,7 +419,17 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
 
   static Map<String, dynamic> _createEmptyResult() {
     Map<String, dynamic> empty = {};
-    for (var key in ['title', 'students', 'supervisor', 'year', 'abstract', 'technologies', 'description', 'keywords', 'category']) {
+    for (var key in [
+      'title',
+      'students',
+      'supervisor',
+      'year',
+      'abstract',
+      'technologies',
+      'description',
+      'keywords',
+      'category',
+    ]) {
       empty[key] = {'value': '', 'confidence': 0.0};
     }
     return empty;
@@ -310,83 +444,105 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
   /// Smart OCR pattern fixing based on common character confusions
   static String _fixCommonOcrPatterns(String text) {
     StringBuffer result = StringBuffer();
-    
+
     for (int i = 0; i < text.length; i++) {
       String current = text[i];
       String next = i + 1 < text.length ? text[i + 1] : '';
       String prev = i > 0 ? text[i - 1] : '';
-      
+
       // Fix 'rn' that should be 'm' (common OCR mistake)
       // Only in middle of words (not at boundaries)
-      if (current == 'r' && next == 'n' && _isLetter(prev) && i + 2 < text.length && _isLetter(text[i + 2])) {
+      if (current == 'r' &&
+          next == 'n' &&
+          _isLetter(prev) &&
+          i + 2 < text.length &&
+          _isLetter(text[i + 2])) {
         result.write('m');
         i++; // Skip the 'n'
         continue;
       }
-      
+
       // Fix 'l' at start of common words that should be 'I'
-      if (current == 'l' && (prev == '' || prev == ' ') && next != '' && next.toLowerCase() == next) {
+      if (current == 'l' &&
+          (prev == '' || prev == ' ') &&
+          next != '' &&
+          next.toLowerCase() == next) {
         // Likely should be capital I (like Ibrahim, Intelligence, Islam)
         result.write('I');
         continue;
       }
-      
+
       // Fix '0' (zero) in names - should be 'o' or 'O'
       if (current == '0' && _isLetter(prev) && _isLetter(next)) {
         result.write(prev == prev.toUpperCase() ? 'O' : 'o');
         continue;
       }
-      
+
       // Fix '1' (one) in names - should be 'l' or 'I'
       if (current == '1' && _isLetter(prev) && _isLetter(next)) {
         result.write(prev == prev.toUpperCase() ? 'I' : 'l');
         continue;
       }
-      
+
       result.write(current);
     }
-    
+
     return result.toString();
   }
 
   /// Clean abstract or description by removing labels and page numbers
   static String _cleanAbstractOrDescription(String text) {
     if (text.isEmpty) return text;
-    
+
     String cleaned = text.trim();
-    
+
     // Remove label at the beginning (case-insensitive)
-    cleaned = cleaned.replaceAll(RegExp(r'^abstract\s*:?\s*', caseSensitive: false), '');
-    cleaned = cleaned.replaceAll(RegExp(r'^description\s*:?\s*', caseSensitive: false), '');
-    
+    cleaned = cleaned.replaceAll(
+      RegExp(r'^abstract\s*:?\s*', caseSensitive: false),
+      '',
+    );
+    cleaned = cleaned.replaceAll(
+      RegExp(r'^description\s*:?\s*', caseSensitive: false),
+      '',
+    );
+
     // Remove page numbers at the end
     // Patterns: "Page 4 87", "Page 4", "P. 87", "pg. 12", "page 87", etc.
-    cleaned = cleaned.replaceAll(RegExp(r'\s*(?:page|pg?\.?)\s*\d+(?:\s+\d+)?\s*$', caseSensitive: false), '');
-    
+    cleaned = cleaned.replaceAll(
+      RegExp(r'\s*(?:page|pg?\.?)\s*\d+(?:\s+\d+)?\s*$', caseSensitive: false),
+      '',
+    );
+
     // Remove standalone numbers at the end that look like page numbers (2-3 digits)
     cleaned = cleaned.replaceAll(RegExp(r'\s+\d{1,3}\s*$'), '');
-    
+
     // Remove common OCR artifacts at the end
-    cleaned = cleaned.replaceAll(RegExp(r'\s*[|]\s*\d+\s*$'), ''); // "text | 87"
-    
+    cleaned = cleaned.replaceAll(
+      RegExp(r'\s*[|]\s*\d+\s*$'),
+      '',
+    ); // "text | 87"
+
     // Clean up extra whitespace
     cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
-    
+
     return cleaned;
   }
-  
+
   /// Clean keywords by removing the "Keywords:" label
   static String _cleanKeywords(String text) {
     if (text.isEmpty) return text;
-    
+
     String cleaned = text.trim();
-    
+
     // Remove "Keywords:" label at the beginning
-    cleaned = cleaned.replaceAll(RegExp(r'^keywords?\s*:?\s*', caseSensitive: false), '');
-    
+    cleaned = cleaned.replaceAll(
+      RegExp(r'^keywords?\s*:?\s*', caseSensitive: false),
+      '',
+    );
+
     // Clean up extra whitespace
     cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
-    
+
     return cleaned;
   }
 
@@ -400,9 +556,9 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
   // ============================
 
   static Map<String, dynamic> _mergeHybrid(
-      Map<String, dynamic> regexData,
-      Map<String, dynamic> aiData) {
-
+    Map<String, dynamic> regexData,
+    Map<String, dynamic> aiData,
+  ) {
     Map<String, dynamic> finalData = {};
 
     for (var key in [
@@ -414,7 +570,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       "technologies",
       "description",
       "keywords",
-      "category"
+      "category",
     ]) {
       String regexValue = regexData[key]?['value'] ?? "";
       double regexConfidence = regexData[key]?['confidence'] ?? 0.0;
@@ -458,12 +614,11 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         aiScore: aiConfidence,
       );
 
-      finalData[key] = {
-        "value": finalValue,
-        "confidence": combinedConfidence
-      };
+      finalData[key] = {"value": finalValue, "confidence": combinedConfidence};
 
-      print('[OCR] $key: "${finalValue.length > 50 ? finalValue.substring(0, 50) + "..." : finalValue}" (AI: $aiConfidence, Regex: $regexConfidence, Final: $combinedConfidence)');
+      print(
+        '[OCR] $key: "${finalValue.length > 50 ? finalValue.substring(0, 50) + "..." : finalValue}" (AI: $aiConfidence, Regex: $regexConfidence, Final: $combinedConfidence)',
+      );
     }
 
     return finalData;
@@ -491,15 +646,17 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
   // ============================
 
   static Map<String, dynamic> _validateAndSanitize(
-      String rawJson,
-      String originalText) {
-    
+    String rawJson,
+    String originalText,
+  ) {
     // FIRST: Try to extract students from incomplete/broken JSON
     String preExtractedStudents = _preExtractStudents(rawJson);
     if (preExtractedStudents.isNotEmpty) {
-      print('[OCR] Pre-extracted students from raw response: "$preExtractedStudents"');
+      print(
+        '[OCR] Pre-extracted students from raw response: "$preExtractedStudents"',
+      );
     }
-    
+
     try {
       // Clean up markdown code blocks and whitespace
       String cleaned = rawJson
@@ -514,7 +671,10 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       cleaned = _fixMultilineJsonStrings(cleaned);
 
       // Try to extract JSON if there's extra text
-      final jsonMatch = RegExp(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', dotAll: true).firstMatch(cleaned);
+      final jsonMatch = RegExp(
+        r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',
+        dotAll: true,
+      ).firstMatch(cleaned);
       if (jsonMatch != null) {
         cleaned = jsonMatch.group(0)!;
       }
@@ -540,7 +700,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         "technologies",
         "description",
         "keywords",
-        "category"
+        "category",
       ]) {
         // Force abstract and description to always be empty
         if (key == "abstract" || key == "description") {
@@ -551,7 +711,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         // Special handling for students if it comes as a list
         dynamic rawValue = decoded[key];
         String value = "";
-        
+
         if (rawValue != null) {
           if (rawValue is List) {
             value = rawValue.map((e) => e.toString()).join(', ').trim();
@@ -560,9 +720,11 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
             value = rawValue.toString().trim();
           }
         }
-        
+
         // Use pre-extracted students if JSON decoding didn't get it or got empty
-        if (key == "students" && (value.isEmpty || value.length < 3) && preExtractedStudents.isNotEmpty) {
+        if (key == "students" &&
+            (value.isEmpty || value.length < 3) &&
+            preExtractedStudents.isNotEmpty) {
           value = preExtractedStudents;
           print('[OCR] Using pre-extracted students: "$value"');
         }
@@ -577,7 +739,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
           value = _cleanAbstractOrDescription(value);
           print('[OCR] Cleaned $key: "$value"');
         }
-        
+
         // Clean up keywords field
         if (key == "keywords") {
           value = _cleanKeywords(value);
@@ -601,9 +763,11 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         bool isValid = _validateExtraction(value, normalizedOriginal, key);
 
         safe[key] = isValid ? value : "";
-        
+
         if (!isValid) {
-          print('[OCR] Rejected AI value for $key: "$value" (not found in original)');
+          print(
+            '[OCR] Rejected AI value for $key: "$value" (not found in original)',
+          );
         }
       }
 
@@ -611,22 +775,25 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     } catch (e) {
       print('[OCR] JSON parse error: $e');
       print('[OCR] Attempting comprehensive fallback extraction...');
-      
+
       // Comprehensive fallback extraction
       final fallbackData = _extractFieldsWithRegex(rawJson, originalText);
-      
+
       // Use pre-extracted students if fallback didn't find any
-      if ((fallbackData['students'] == null || fallbackData['students']!.isEmpty) && 
+      if ((fallbackData['students'] == null ||
+              fallbackData['students']!.isEmpty) &&
           preExtractedStudents.isNotEmpty) {
         fallbackData['students'] = preExtractedStudents;
-        print('[OCR] Using pre-extracted students in fallback: "$preExtractedStudents"');
+        print(
+          '[OCR] Using pre-extracted students in fallback: "$preExtractedStudents"',
+        );
       }
-      
+
       print('[OCR] Fallback extraction results:');
       fallbackData.forEach((key, value) {
         print('[OCR]   $key: "$value"');
       });
-      
+
       return fallbackData;
     }
   }
@@ -634,7 +801,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
   static String _fixIncompleteJson(String json) {
     int openBraces = '{'.allMatches(json).length;
     int closeBraces = '}'.allMatches(json).length;
-    
+
     int quoteCount = 0;
     bool escaped = false;
     for (int i = 0; i < json.length; i++) {
@@ -650,25 +817,29 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         quoteCount++;
       }
     }
-    
+
     if (quoteCount % 2 == 1) {
       print('[OCR] Fixing unclosed string');
       json = json + '"';
     }
-    
+
     while (closeBraces < openBraces) {
       print('[OCR] Adding missing closing brace');
       json = json + '}';
       closeBraces++;
     }
-    
+
     return json;
   }
 
   static String _preExtractStudents(String rawResponse) {
-    var match = RegExp(r'"students"\s*:\s*"([^"]*)', dotAll: true).firstMatch(rawResponse);
+    var match = RegExp(
+      r'"students"\s*:\s*"([^"]*)',
+      dotAll: true,
+    ).firstMatch(rawResponse);
     if (match != null) {
-      String extracted = match.group(1)!
+      String extracted = match
+          .group(1)!
           .replaceAll(RegExp(r'[\n\r]+'), ', ')
           .replaceAll(RegExp(r'\s+'), ' ')
           .trim();
@@ -676,8 +847,11 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         return extracted;
       }
     }
-    
-    match = RegExp(r'"students"\s*:\s*\[([\s\S]*?)(?:\]|$)', dotAll: true).firstMatch(rawResponse);
+
+    match = RegExp(
+      r'"students"\s*:\s*\[([\s\S]*?)(?:\]|$)',
+      dotAll: true,
+    ).firstMatch(rawResponse);
     if (match != null) {
       String arrayContent = match.group(1)!;
       String extracted = arrayContent
@@ -689,7 +863,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         return extracted;
       }
     }
-    
+
     return "";
   }
 
@@ -697,29 +871,29 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     StringBuffer result = StringBuffer();
     bool inString = false;
     bool escaped = false;
-    
+
     for (int i = 0; i < json.length; i++) {
       String char = json[i];
       String nextChar = i + 1 < json.length ? json[i + 1] : '';
-      
+
       if (escaped) {
         result.write(char);
         escaped = false;
         continue;
       }
-      
+
       if (char == '\\') {
         escaped = true;
         result.write(char);
         continue;
       }
-      
+
       if (char == '"') {
         inString = !inString;
         result.write(char);
         continue;
       }
-      
+
       if (inString && (char == '\n' || char == '\r')) {
         result.write(' ');
         if (char == '\r' && nextChar == '\n') {
@@ -727,18 +901,19 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         }
         continue;
       }
-      
+
       result.write(char);
     }
-    
+
     return result.toString();
   }
 
   static Map<String, dynamic> _extractFieldsWithRegex(
-      String rawResponse,
-      String originalText) {
+    String rawResponse,
+    String originalText,
+  ) {
     Map<String, dynamic> extracted = {};
-    
+
     final patterns = {
       'title': r'"title"\s*:\s*"([^"]+)"',
       'supervisor': r'"supervisor"\s*:\s*"([^"]+)"',
@@ -747,36 +922,48 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       'keywords': r'"keywords"\s*:\s*"([^"]+)"',
       'category': r'"category"\s*:\s*"([^"]+)"',
     };
-    
+
     for (var entry in patterns.entries) {
       final key = entry.key;
       final pattern = entry.value;
       var match = RegExp(pattern).firstMatch(rawResponse);
-      
+
       if (match != null) {
         extracted[key] = match.group(1)!.trim();
       } else {
         extracted[key] = "";
       }
     }
-    
+
     extracted['abstract'] = "";
     extracted['description'] = "";
-    
-    String students = _extractStudentsFromRawResponse(rawResponse, originalText);
+
+    String students = _extractStudentsFromRawResponse(
+      rawResponse,
+      originalText,
+    );
     extracted['students'] = students;
-    
+
     return extracted;
   }
 
-  static String _extractStudentsFromRawResponse(String rawResponse, String originalText) {
-    var match = RegExp(r'"students"\s*:\s*"([^"]*)', dotAll: true).firstMatch(rawResponse);
+  static String _extractStudentsFromRawResponse(
+    String rawResponse,
+    String originalText,
+  ) {
+    var match = RegExp(
+      r'"students"\s*:\s*"([^"]*)',
+      dotAll: true,
+    ).firstMatch(rawResponse);
     if (match != null && match.group(1)!.trim().isNotEmpty) {
       String extracted = match.group(1)!.trim().replaceAll(RegExp(r'\s+'), ' ');
       return extracted;
     }
-    
-    match = RegExp(r'"students"\s*:\s*\[([\s\S]*?)(?:\]|$)', dotAll: true).firstMatch(rawResponse);
+
+    match = RegExp(
+      r'"students"\s*:\s*\[([\s\S]*?)(?:\]|$)',
+      dotAll: true,
+    ).firstMatch(rawResponse);
     if (match != null) {
       String arrayContent = match.group(1)!;
       String extracted = arrayContent
@@ -788,16 +975,20 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         return extracted;
       }
     }
-    
+
     String heuristic = _extractStudents(originalText);
     if (heuristic.isNotEmpty) {
       return heuristic;
     }
-    
+
     return "";
   }
 
-  static bool _validateExtraction(String value, String originalText, String field) {
+  static bool _validateExtraction(
+    String value,
+    String originalText,
+    String field,
+  ) {
     if (field == "year") {
       return RegExp(r'^20\d{2}$').hasMatch(value);
     }
@@ -846,14 +1037,8 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     return data;
   }
 
-  static void _addField(
-      Map<String, dynamic> map,
-      String key,
-      String value) {
-    map[key] = {
-      "value": value,
-      "confidence": _calculateRegexConfidence(value)
-    };
+  static void _addField(Map<String, dynamic> map, String key, String value) {
+    map[key] = {"value": value, "confidence": _calculateRegexConfidence(value)};
   }
 
   static double _calculateRegexConfidence(String value) {
@@ -866,12 +1051,12 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
 
   static String _extractSupervisor(String fullText) {
     String supervisorName = '';
-    
+
     final supervisionMatch = RegExp(
       r'under\s+supervision\s+of\s+((?:dr|prof|mr|ms|mrs)\.?\s+[a-z]+(?:\s+[a-z]+)?)',
-      caseSensitive: false
+      caseSensitive: false,
     ).firstMatch(fullText);
-    
+
     if (supervisionMatch != null) {
       supervisorName = supervisionMatch.group(1)!.trim();
     }
@@ -879,9 +1064,9 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     if (supervisorName.isEmpty) {
       final labelMatch = RegExp(
         r'supervis(?:or|ion)\s*:?\s*((?:dr|prof|mr|ms|mrs)\.?\s+[a-z]+(?:\s+[a-z]+)?)',
-        caseSensitive: false
+        caseSensitive: false,
       ).firstMatch(fullText);
-      
+
       if (labelMatch != null) {
         supervisorName = labelMatch.group(1)!.trim();
       }
@@ -890,9 +1075,9 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     if (supervisorName.isEmpty) {
       final titlePattern = RegExp(
         r'(?:dr\.|prof\.|mr\.|ms\.|mrs\.)\s+[a-z]+(?:\s+[a-z]+)?',
-        caseSensitive: false
+        caseSensitive: false,
       );
-      
+
       final match = titlePattern.firstMatch(fullText);
       if (match != null) {
         supervisorName = match.group(0)!.trim();
@@ -909,66 +1094,70 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
   /// Smart OCR error correction using pattern analysis
   static String _correctOcrErrors(String text) {
     if (text.isEmpty) return text;
-    
+
     String corrected = _fixCommonOcrPatterns(text);
-    
+
     List<String> words = corrected.split(' ');
     List<String> correctedWords = [];
-    
+
     for (var word in words) {
       if (word.isEmpty) continue;
-      
+
       String cleanWord = word.toLowerCase().replaceAll('.', '');
-      
-      if (cleanWord == 'dr' || cleanWord == 'prof' || cleanWord == 'mr' || cleanWord == 'ms' || cleanWord == 'mrs') {
+
+      if (cleanWord == 'dr' ||
+          cleanWord == 'prof' ||
+          cleanWord == 'mr' ||
+          cleanWord == 'ms' ||
+          cleanWord == 'mrs') {
         correctedWords.add(_capitalizeTitle(cleanWord));
         continue;
       }
-      
+
       String correctedWord = _smartCorrectWord(word);
       correctedWords.add(correctedWord);
     }
-    
+
     return correctedWords.join(' ');
   }
 
   static String _smartCorrectWord(String word) {
     if (word.isEmpty) return word;
-    
+
     String lower = word.toLowerCase();
     String corrected = lower;
-    
+
     if (corrected.endsWith('mn') && corrected.length > 4) {
       corrected = corrected.substring(0, corrected.length - 1);
     }
-    
+
     corrected = corrected.replaceAllMapped(
       RegExp(r'([a-z])rn([a-z])'),
-      (match) => '${match.group(1)}m${match.group(2)}'
+      (match) => '${match.group(1)}m${match.group(2)}',
     );
-    
+
     if (corrected.endsWith('nar') && corrected.length > 4) {
       corrected = corrected.replaceAll(RegExp(r'nar$'), 'mar');
     }
-    
+
     if (corrected.endsWith('ml') && corrected.length > 3) {
       corrected = corrected.replaceAll(RegExp(r'ml$'), 'mal');
     }
     if (corrected.endsWith('rnal') && corrected.length > 5) {
       corrected = corrected.replaceAll(RegExp(r'rnal$'), 'mal');
     }
-    
+
     corrected = corrected.replaceAll('ei', 'e');
-    
+
     corrected = corrected.replaceAllMapped(
       RegExp(r'([b-df-hj-np-tv-z])\1+'),
-      (match) => match.group(1)!
+      (match) => match.group(1)!,
     );
-    
+
     if (corrected.isNotEmpty) {
       corrected = corrected[0].toUpperCase() + corrected.substring(1);
     }
-    
+
     return corrected;
   }
 
@@ -992,9 +1181,9 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
   static String _extractTechnologies(String fullText) {
     final match = RegExp(
       r'(?:technolog|tools|stack)(?:ies|y)?\s*:?\s*(.+?)(?:\n|$)',
-      caseSensitive: false
+      caseSensitive: false,
     ).firstMatch(fullText);
-    
+
     if (match != null) {
       String tech = match.group(1)!.trim();
       if (tech.isNotEmpty && tech.length < 200) {
@@ -1006,36 +1195,43 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
   }
 
   static String _extractYear(String text) {
-    final labelMatch = RegExp(r'(?:year|academic year)\s*:?\s*(20\d{2})', caseSensitive: false)
-        .firstMatch(text);
+    final labelMatch = RegExp(
+      r'(?:year|academic year)\s*:?\s*(20\d{2})',
+      caseSensitive: false,
+    ).firstMatch(text);
     if (labelMatch != null) {
       return labelMatch.group(1)!;
     }
 
-    final monthPattern = RegExp(r'(?:january|february|march|april|may|june|july|august|september|october|november|december)', caseSensitive: false);
-    
+    final monthPattern = RegExp(
+      r'(?:january|february|march|april|may|june|july|august|september|october|november|december)',
+      caseSensitive: false,
+    );
+
     final allMatches = RegExp(r'\b(20\d{2})\b').allMatches(text);
-    
+
     if (allMatches.isEmpty) return '';
-    
+
     String lastValidYear = '';
     for (var match in allMatches) {
       int startPos = match.start;
-      String beforeText = startPos > 50 ? text.substring(startPos - 50, startPos) : text.substring(0, startPos);
-      
+      String beforeText = startPos > 50
+          ? text.substring(startPos - 50, startPos)
+          : text.substring(0, startPos);
+
       if (monthPattern.hasMatch(beforeText)) {
         continue;
       }
-      
+
       lastValidYear = match.group(1)!;
     }
-    
+
     return lastValidYear;
   }
 
   static String _guessTitle(String fullText) {
     List<String> lines = fullText.split('\n');
-    
+
     for (var line in lines) {
       String clean = line.trim();
       if (clean.isEmpty) continue;
@@ -1067,20 +1263,164 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
 
   static String _guessCategory(String fullText) {
     String lower = fullText.toLowerCase();
-    
+
     final categories = {
-      'Medical': ['medical', 'hospital', 'patient', 'doctor', 'clinic', 'healthcare', 'disease', 'diagnosis', 'treatment', 'medicine', 'health', 'nursing', 'pharma', 'pharmaceutical'],
-      'Education': ['education', 'school', 'student', 'learning', 'course', 'university', 'training', 'academic', 'classroom', 'teacher', 'exam', 'grade', 'assessment', 'online learning', 'e-learning'],
-      'Finance': ['bank', 'finance', 'payment', 'transaction', 'investment', 'crypto', 'stock', 'trading', 'financial', 'accounting', 'wallet', 'billing', 'invoice', 'loan'],
-      'E-Commerce': ['ecommerce', 'e-commerce', 'shopping', 'store', 'product', 'cart', 'checkout', 'vendor', 'seller', 'buyer', 'marketplace', 'commerce', 'shop', 'retail'],
-      'Social Media': ['social', 'network', 'chat', 'messaging', 'post', 'feed', 'like', 'comment', 'share', 'friend', 'follower', 'community', 'interaction', 'profile'],
-      'Entertainment': ['entertainment', 'movie', 'music', 'game', 'video', 'streaming', 'audio', 'content', 'media', 'podcast', 'cinema', 'play', 'film', 'show'],
-      'Transportation': ['transport', 'taxi', 'ride', 'delivery', 'logistics', 'shipping', 'car', 'driver', 'route', 'tracking', 'fleet', 'vehicle', 'cargo', 'courier'],
-      'Smart Agriculture': ['agriculture', 'farm', 'farming', 'crop', 'soil', 'irrigation', 'weather', 'farmer', 'harvest', 'greenhouse', 'agricultural', 'smart farming'],
-      'IoT/Smart Home': ['smart home', 'iot', 'sensor', 'automation', 'smart', 'arduino', 'raspberry', 'embedded', 'device', 'connected', 'internet of things', 'home automation'],
-      'Manufacturing': ['manufacturing', 'factory', 'production', 'industrial', 'machinery', 'process', 'quality', 'supply chain', 'warehouse', 'inventory', 'automation'],
+      'Medical': [
+        'medical',
+        'hospital',
+        'patient',
+        'doctor',
+        'clinic',
+        'healthcare',
+        'disease',
+        'diagnosis',
+        'treatment',
+        'medicine',
+        'health',
+        'nursing',
+        'pharma',
+        'pharmaceutical',
+      ],
+      'Education': [
+        'education',
+        'school',
+        'student',
+        'learning',
+        'course',
+        'university',
+        'training',
+        'academic',
+        'classroom',
+        'teacher',
+        'exam',
+        'grade',
+        'assessment',
+        'online learning',
+        'e-learning',
+      ],
+      'Finance': [
+        'bank',
+        'finance',
+        'payment',
+        'transaction',
+        'investment',
+        'crypto',
+        'stock',
+        'trading',
+        'financial',
+        'accounting',
+        'wallet',
+        'billing',
+        'invoice',
+        'loan',
+      ],
+      'E-Commerce': [
+        'ecommerce',
+        'e-commerce',
+        'shopping',
+        'store',
+        'product',
+        'cart',
+        'checkout',
+        'vendor',
+        'seller',
+        'buyer',
+        'marketplace',
+        'commerce',
+        'shop',
+        'retail',
+      ],
+      'Social Media': [
+        'social',
+        'network',
+        'chat',
+        'messaging',
+        'post',
+        'feed',
+        'like',
+        'comment',
+        'share',
+        'friend',
+        'follower',
+        'community',
+        'interaction',
+        'profile',
+      ],
+      'Entertainment': [
+        'entertainment',
+        'movie',
+        'music',
+        'game',
+        'video',
+        'streaming',
+        'audio',
+        'content',
+        'media',
+        'podcast',
+        'cinema',
+        'play',
+        'film',
+        'show',
+      ],
+      'Transportation': [
+        'transport',
+        'taxi',
+        'ride',
+        'delivery',
+        'logistics',
+        'shipping',
+        'car',
+        'driver',
+        'route',
+        'tracking',
+        'fleet',
+        'vehicle',
+        'cargo',
+        'courier',
+      ],
+      'Smart Agriculture': [
+        'agriculture',
+        'farm',
+        'farming',
+        'crop',
+        'soil',
+        'irrigation',
+        'weather',
+        'farmer',
+        'harvest',
+        'greenhouse',
+        'agricultural',
+        'smart farming',
+      ],
+      'IoT/Smart Home': [
+        'smart home',
+        'iot',
+        'sensor',
+        'automation',
+        'smart',
+        'arduino',
+        'raspberry',
+        'embedded',
+        'device',
+        'connected',
+        'internet of things',
+        'home automation',
+      ],
+      'Manufacturing': [
+        'manufacturing',
+        'factory',
+        'production',
+        'industrial',
+        'machinery',
+        'process',
+        'quality',
+        'supply chain',
+        'warehouse',
+        'inventory',
+        'automation',
+      ],
     };
-    
+
     Map<String, int> scores = {};
     for (var entry in categories.entries) {
       int count = 0;
@@ -1091,47 +1431,48 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         scores[entry.key] = count;
       }
     }
-    
+
     if (scores.isNotEmpty) {
       var best = scores.entries.reduce((a, b) => a.value > b.value ? a : b);
       return best.key;
     }
-    
+
     return 'Other';
   }
 
   static String _extractStudents(String fullText) {
     print('[OCR] === Starting heuristic student extraction ===');
-    
+
     List<String> names = [];
-    
+
     final numberedPattern = RegExp(
       r'(\d+)\s*[-–.]\s*([a-z]+(?:\s+[a-z]+){1,6})',
-      caseSensitive: false
+      caseSensitive: false,
     );
-    
+
     final matches = numberedPattern.allMatches(fullText);
     print('[OCR] Found ${matches.length} numbered patterns in text');
-    
+
     for (var match in matches) {
       String number = match.group(1)!;
       String name = match.group(2)!.trim();
-      
+
       if (name.length < 5 || name.length > 150) continue;
-      if (name.toLowerCase().contains(RegExp(r'chapter|section|page|abstract|project|supervision|university|faculty|benha|feb|january|february|march|april|may|june|july|august|september|october|november|december|submitted|requirements|degree|bachelor|computer|science|department|team'))) continue;
-      
-      name = name
-          .replaceAll(RegExp(r'\s+'), ' ')
-          .trim();
-      
+      if (name.toLowerCase().contains(
+        RegExp(
+          r'chapter|section|page|abstract|project|supervision|university|faculty|benha|feb|january|february|march|april|may|june|july|august|september|october|november|december|submitted|requirements|degree|bachelor|computer|science|department|team',
+        ),
+      ))
+        continue;
+
+      name = name.replaceAll(RegExp(r'\s+'), ' ').trim();
+
       List<String> words = name.split(' ');
       if (words.length >= 2 && words.length <= 7) {
-        bool looksLikeName = words.every((w) => 
-          w.isNotEmpty && 
-          w[0].toUpperCase() == w[0] &&
-          w.length > 1
+        bool looksLikeName = words.every(
+          (w) => w.isNotEmpty && w[0].toUpperCase() == w[0] && w.length > 1,
         );
-        
+
         if (looksLikeName) {
           name = _correctOcrErrors(name);
           names.add(name);
@@ -1139,11 +1480,11 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         }
       }
     }
-    
+
     if (names.isNotEmpty) {
       List<String> uniqueNames = [];
       Set<String> seen = {};
-      
+
       for (var name in names) {
         String normalized = name.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
         if (!seen.contains(normalized)) {
@@ -1153,7 +1494,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       }
       names = uniqueNames;
     }
-    
+
     String result = names.join(', ');
     print('[OCR] === Total students extracted: ${names.length} ===');
     print('[OCR] === Final student list: "$result" ===');
