@@ -3,31 +3,134 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 
 class OcrService {
-  // ⚠️ REPLACE THIS WITH YOUR ACTUAL GEMINI API KEY
-  // Get your key from: https://aistudio.google.com/app/apikey
-  static const String GEMINI_API_KEY =
-      'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8';
-
   // ============================
-  // MAIN PUBLIC API - Use this in your app
+  // MULTI-KEY ROTATION SYSTEM
   // ============================
 
-  /// Complete OCR pipeline: Image → Text Extraction → Data Extraction
-  /// This is the main method to use in your app
-  ///
-  /// @param base64Image - Base64 encoded image string
-  /// @param fallbackOcrText - Optional: If you have text from another OCR engine, pass it as fallback
-  /// @return Map with extracted fields (title, students, supervisor, year, etc.)
+  /// Add as many API keys as you want here.
+  /// When one hits its rate limit (429), the next one is tried automatically.
+  static const List<String> _apiKeys = [
+    'AIzaSyDUnS-PQ0tN5S9aOGXsk4KPY9CqRdIUrSE',
+    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
+    'AIzaSyDTVoQJEt9K4NCjyizW8E1r__RvDPbKTCg',
+    'AIzaSyDZm5_Ex_erY6lPhsAHFShlLjdClOovm2U',
+    // Add more keys here...
+  ];
+
+  /// Tracks which keys are temporarily blocked (rate-limited) and when they expire.
+  /// Key = API key string, Value = DateTime when the cooldown ends.
+  static final Map<String, DateTime> _rateLimitedUntil = {};
+
+  /// Returns the next available (non-rate-limited) API key, or null if all are blocked.
+  static String? _getAvailableKey() {
+    final now = DateTime.now();
+    for (final key in _apiKeys) {
+      final blockedUntil = _rateLimitedUntil[key];
+      if (blockedUntil == null || now.isAfter(blockedUntil)) {
+        // Clear expired cooldown
+        _rateLimitedUntil.remove(key);
+        return key;
+      }
+    }
+    return null; // All keys are rate-limited
+  }
+
+  /// Marks a key as rate-limited for [cooldownMinutes] minutes.
+  static void _markRateLimited(String key, {int cooldownMinutes = 1}) {
+    _rateLimitedUntil[key] = DateTime.now().add(
+      Duration(minutes: cooldownMinutes),
+    );
+    print(
+      '[OCR] Key ending in ...${key.substring(key.length - 6)} rate-limited for $cooldownMinutes min.',
+    );
+  }
+
+  /// Makes a Gemini API POST request with automatic key rotation on 429 errors.
+  /// [modelPath] = e.g. "models/gemini-2.0-flash-exp"
+  /// [body] = the full request body map (without the key)
+  /// [timeoutSeconds] = request timeout
+  /// Returns the decoded response body, or null on total failure.
+  static Future<Map<String, dynamic>?> _geminiRequest({
+    required String modelPath,
+    required Map<String, dynamic> body,
+    int timeoutSeconds = 30,
+  }) async {
+    // Try each available key in order
+    for (int attempt = 0; attempt < _apiKeys.length; attempt++) {
+      final key = _getAvailableKey();
+
+      if (key == null) {
+        print('[OCR] ⚠️ All API keys are currently rate-limited. Waiting...');
+        // Wait for the shortest cooldown to expire
+        final soonestExpiry = _rateLimitedUntil.values.reduce(
+          (a, b) => a.isBefore(b) ? a : b,
+        );
+        final waitMs =
+            soonestExpiry.difference(DateTime.now()).inMilliseconds + 100;
+        if (waitMs > 0 && waitMs < 120000) {
+          await Future.delayed(Duration(milliseconds: waitMs));
+        }
+        continue;
+      }
+
+      final url = Uri.parse(
+        'https://generativelanguage.googleapis.com/v1beta/$modelPath:generateContent?key=$key',
+      );
+
+      try {
+        final response = await http
+            .post(
+              url,
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(body),
+            )
+            .timeout(Duration(seconds: timeoutSeconds));
+
+        if (response.statusCode == 200) {
+          return jsonDecode(response.body) as Map<String, dynamic>;
+        } else if (response.statusCode == 429) {
+          print(
+            '[OCR] Rate limit hit for key ...${key.substring(key.length - 6)}, trying next key...',
+          );
+          _markRateLimited(key);
+          // Continue loop to try next key
+          continue;
+        } else if (response.statusCode == 503 || response.statusCode == 500) {
+          print(
+            '[OCR] Server error ${response.statusCode}, retrying with next key...',
+          );
+          continue;
+        } else {
+          print(
+            '[OCR] Gemini error: ${response.statusCode} - ${response.body}',
+          );
+          return null;
+        }
+      } catch (e) {
+        print(
+          '[OCR] Request error with key ...${key.substring(key.length - 6)}: $e',
+        );
+        // Don't rate-limit on timeout/network errors, just try next key
+        continue;
+      }
+    }
+
+    print('[OCR] ❌ All API keys failed or exhausted.');
+    return null;
+  }
+
+  // ============================
+  // MAIN PUBLIC API
+  // ============================
+
   static Future<Map<String, dynamic>> extractFromImage(
     String base64Image, {
     String? fallbackOcrText,
   }) async {
     print('[OCR] ===== Starting Image OCR Processing =====');
 
-    // Step 1: Extract text using Gemini Vision (best quality)
     String extractedText = await _performGeminiVisionOCR(base64Image);
 
-    // Step 2: Fallback to provided OCR text if Gemini Vision failed
     if (extractedText.isEmpty &&
         fallbackOcrText != null &&
         fallbackOcrText.isNotEmpty) {
@@ -35,30 +138,19 @@ class OcrService {
       extractedText = fallbackOcrText;
     }
 
-    // Step 3: If we still don't have text, return empty result
     if (extractedText.isEmpty) {
       print('[OCR] ERROR: No text could be extracted from image');
       return _createEmptyResult();
     }
 
-    // Step 4: Process the extracted text to get structured data
     return await processOCR(extractedText);
   }
 
-  /// Extracts a single specific field from OCR text using a focused Gemini call
   static Future<String> extractSingleField(
     String rawText,
     String fieldName,
   ) async {
     try {
-      if (GEMINI_API_KEY == 'YOUR_API_KEY_HERE' || GEMINI_API_KEY.isEmpty) {
-        return '';
-      }
-
-      final url = Uri.parse(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY",
-      );
-
       final fieldInstructions = {
         'abstract': '''
 Extract the ABSTRACT section from this document.
@@ -112,58 +204,48 @@ $rawText
 
       print('[OCR] Extracting single field: $fieldName');
 
-      final response = await http
-          .post(
-            url,
-            headers: {"Content-Type": "application/json"},
-            body: jsonEncode({
-              "contents": [
-                {
-                  "parts": [
-                    {"text": prompt},
-                  ],
-                },
+      final decoded = await _geminiRequest(
+        modelPath: 'models/gemini-2.5-flash',
+        body: {
+          'contents': [
+            {
+              'parts': [
+                {'text': prompt},
               ],
-              "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
-            }),
-          )
-          .timeout(const Duration(seconds: 20));
+            },
+          ],
+          'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 2048},
+        },
+        timeoutSeconds: 20,
+      );
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
+      if (decoded == null) return '';
 
-        if (decoded["candidates"] == null || decoded["candidates"].isEmpty) {
-          return '';
-        }
-
-        final text =
-            decoded["candidates"][0]["content"]["parts"][0]["text"] as String;
-
-        if (text.trim() == 'NOT_FOUND') {
-          print('[OCR] Field $fieldName not found in text');
-          return '';
-        }
-
-        print(
-          '[OCR] Extracted $fieldName: "${text.substring(0, text.length.clamp(0, 100))}..."',
-        );
-        return text.trim();
-      } else {
-        print('[OCR] Single field extraction error: ${response.statusCode}');
+      if (decoded['candidates'] == null || decoded['candidates'].isEmpty) {
         return '';
       }
+
+      final text =
+          decoded['candidates'][0]['content']['parts'][0]['text'] as String;
+
+      if (text.trim() == 'NOT_FOUND') {
+        print('[OCR] Field $fieldName not found in text');
+        return '';
+      }
+
+      print(
+        '[OCR] Extracted $fieldName: "${text.substring(0, text.length.clamp(0, 100))}..."',
+      );
+      return text.trim();
     } catch (e) {
       print('[OCR] extractSingleField error: $e');
       return '';
     }
   }
 
-  /// Process OCR text (legacy method for backward compatibility)
-  /// Use extractFromImage() for new implementations
   static Future<Map<String, dynamic>> processOCR(String rawText) async {
     print('[OCR] ===== Starting OCR Processing =====');
 
-    // Preprocess OCR text to fix common issues
     String cleanedText = _preprocessOcrText(rawText);
     print('[OCR] Text preprocessing complete');
 
@@ -177,7 +259,7 @@ $rawText
 
     if (aiData.isEmpty) {
       print('[OCR] AI extraction failed, using heuristic data only');
-      return regexData; // fallback
+      return regexData;
     }
 
     return _mergeHybrid(regexData, aiData);
@@ -187,19 +269,8 @@ $rawText
   // GEMINI VISION OCR
   // ============================
 
-  /// Enhanced OCR using Gemini's vision capabilities
-  /// This provides MUCH better quality than traditional OCR engines
   static Future<String> _performGeminiVisionOCR(String base64Image) async {
     try {
-      if (GEMINI_API_KEY == 'YOUR_API_KEY_HERE' || GEMINI_API_KEY.isEmpty) {
-        print('[OCR] ⚠️ Gemini API key not configured');
-        return '';
-      }
-
-      final url = Uri.parse(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=$GEMINI_API_KEY",
-      );
-
       final prompt = """
 Extract ALL text from this document image with perfect accuracy.
 
@@ -224,50 +295,40 @@ Return ONLY the raw extracted text with original line breaks, nothing else.
 
       print('[OCR] Calling Gemini Vision API...');
 
-      final response = await http
-          .post(
-            url,
-            headers: {"Content-Type": "application/json"},
-            body: jsonEncode({
-              "contents": [
+      final decoded = await _geminiRequest(
+        modelPath: 'models/gemini-2.0-flash-exp',
+        body: {
+          'contents': [
+            {
+              'parts': [
+                {'text': prompt},
                 {
-                  "parts": [
-                    {"text": prompt},
-                    {
-                      "inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": base64Image,
-                      },
-                    },
-                  ],
+                  'inline_data': {
+                    'mime_type': 'image/jpeg',
+                    'data': base64Image,
+                  },
                 },
               ],
-              "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096},
-            }),
-          )
-          .timeout(const Duration(seconds: 30));
+            },
+          ],
+          'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 4096},
+        },
+        timeoutSeconds: 30,
+      );
 
-      print('[OCR] Gemini Vision Status: ${response.statusCode}');
+      if (decoded == null) return '';
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
-
-        if (decoded["candidates"] == null || decoded["candidates"].isEmpty) {
-          print('[OCR] No candidates in Gemini Vision response');
-          return '';
-        }
-
-        final text = decoded["candidates"][0]["content"]["parts"][0]["text"];
-        print('[OCR] ===== GEMINI VISION EXTRACTED TEXT =====');
-        print(text);
-        print('[OCR] ===== END EXTRACTED TEXT (${text.length} chars) =====');
-
-        return text;
-      } else {
-        print(
-          '[OCR] Gemini Vision Error: ${response.statusCode} - ${response.body}',
-        );
+      if (decoded['candidates'] == null || decoded['candidates'].isEmpty) {
+        print('[OCR] No candidates in Gemini Vision response');
+        return '';
       }
+
+      final text = decoded['candidates'][0]['content']['parts'][0]['text'];
+      print('[OCR] ===== GEMINI VISION EXTRACTED TEXT =====');
+      print(text);
+      print('[OCR] ===== END EXTRACTED TEXT (${text.length} chars) =====');
+
+      return text;
     } catch (e) {
       print('[OCR] Gemini Vision exception: $e');
     }
@@ -281,17 +342,6 @@ Return ONLY the raw extracted text with original line breaks, nothing else.
 
   static Future<Map<String, dynamic>> _extractWithGemini(String rawText) async {
     try {
-      if (GEMINI_API_KEY == 'YOUR_API_KEY_HERE' || GEMINI_API_KEY.isEmpty) {
-        print(
-          '[OCR] ⚠️ Gemini API key not configured - using regex fallback only',
-        );
-        return {};
-      }
-
-      final url = Uri.parse(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY",
-      );
-
       final prompt =
           """
 Extract information from this OCR text and return ONLY valid, parseable JSON.
@@ -315,26 +365,19 @@ FIELD-SPECIFIC INSTRUCTIONS:
 - students: **MOST CRITICAL FIELD** - Extract ALL student FULL NAMES exactly as they appear. Look for numbered lists like "1- Full Name" or "1. Full Name". Include ALL parts of each name (first, middle, last names). Return as comma-separated list. Example: "Yahia Mohammed Mansour Hassan Hamza, Mohammed Sabry Mahmoud Shehabeldin, Hadi Rabee Kamel Alam Heikal". DO NOT abbreviate names - use complete names.
 - supervisor: Extract supervisor name with title (e.g., "Dr. Ahmed Shalaby", "Prof. John Smith")
 - year: Extract project/submission year ONLY (e.g., "2024") - NOT dates from abstract
-- abstract: Extract ONLY the abstract content text. Remove the word "Abstract" if it appears at the start. Remove page numbers (e.g., "Page 4", "P. 87", "Page 4 87") from the end. Remove any headers or labels. Return ONLY the clean abstract text content.
+- abstract: Extract ONLY the abstract content text. Remove the word "Abstract" if it appears at the start. Remove page numbers from the end. Return ONLY the clean abstract text content.
 - technologies: Extract technology stack if explicitly mentioned (e.g., "Java, Python, MySQL")
-- description: Extract ONLY the description content text. Remove the word "Description" if it appears at the start. Remove page numbers (e.g., "Page 4", "P. 87") from the end. Remove any headers or labels. Return ONLY the clean description text content.
+- description: Extract ONLY the description content text. Remove the word "Description" if it appears at the start. Remove page numbers from the end. Return ONLY the clean description text content.
 - keywords: Extract keywords ONLY if explicitly listed with "Keywords:" label, otherwise return "". Remove the "Keywords:" label itself from the output.
 - category: Choose ONE from: Medical, Education, Finance, E-Commerce, Social Media, Entertainment, Transportation, Smart Agriculture, IoT/Smart Home, Manufacturing, Other
 
 REQUIRED JSON FORMAT - EXAMPLE:
-{"title": "Smart Healthcare System", "students": "Ahmed Hassan Mohamed Ali, Sara Ibrahim Khalil, Omar Mahmoud Youssef", "supervisor": "Dr. Ahmed Shalaby", "year": "2024", "abstract": "This project addresses critical gaps in current project management approaches while maintaining scalability and user-friendly interfaces.", "technologies": "Java, Spring Boot, MySQL", "description": "A comprehensive system designed to improve healthcare management efficiency through AI-powered analytics and automated workflows.", "keywords": "healthcare, management, AI, automation", "category": "Medical"}
+{"title": "Smart Healthcare System", "students": "Ahmed Hassan Mohamed Ali, Sara Ibrahim Khalil, Omar Mahmoud Youssef", "supervisor": "Dr. Ahmed Shalaby", "year": "2024", "abstract": "This project addresses critical gaps in current project management approaches.", "technologies": "Java, Spring Boot, MySQL", "description": "A comprehensive system designed to improve healthcare management efficiency.", "keywords": "healthcare, management, AI, automation", "category": "Medical"}
 
 CRITICAL CLEANING RULES:
 1. Remove label words: "Abstract:", "Description:", "Keywords:", "Title:" from the beginning
 2. Remove page references: "Page 4 87", "Page 4", "P. 87", "pg. 12" from the end
 3. Return ONLY the clean content text
-4. Example: "Abstract: This is the text. Page 4 87" → "This is the text."
-
-CRITICAL REMINDERS:
-1. Extract COMPLETE student names - do not shorten or abbreviate
-2. DO NOT extract abstract or description - return empty strings
-3. Ensure JSON is COMPLETE with all closing quotes and braces
-4. All values must be on single lines (no line breaks)
 
 OCR Text:
 $rawText
@@ -342,68 +385,52 @@ $rawText
 RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
 """;
 
-      // Retry logic (max 2 attempts)
+      // Retry up to 2 times (across available keys)
       for (int attempt = 0; attempt < 2; attempt++) {
-        try {
-          final response = await http
-              .post(
-                url,
-                headers: {"Content-Type": "application/json"},
-                body: jsonEncode({
-                  "contents": [
-                    {
-                      "parts": [
-                        {"text": prompt},
-                      ],
-                    },
-                  ],
-                  "generationConfig": {
-                    "temperature": 0.0,
-                    "maxOutputTokens": 2048,
-                    "topP": 0.95,
-                  },
-                }),
-              )
-              .timeout(const Duration(seconds: 20));
+        final decoded = await _geminiRequest(
+          modelPath: 'models/gemini-2.5-flash',
+          body: {
+            'contents': [
+              {
+                'parts': [
+                  {'text': prompt},
+                ],
+              },
+            ],
+            'generationConfig': {
+              'temperature': 0.0,
+              'maxOutputTokens': 2048,
+              'topP': 0.95,
+            },
+          },
+          timeoutSeconds: 20,
+        );
 
-          print('[OCR] Gemini Extraction Status: ${response.statusCode}');
+        if (decoded == null) {
+          if (attempt < 1) await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
 
-          if (response.statusCode == 200) {
-            final decoded = jsonDecode(response.body);
+        if (decoded['candidates'] == null || decoded['candidates'].isEmpty) {
+          print('[OCR] No candidates in response');
+          continue;
+        }
 
-            if (decoded["candidates"] == null ||
-                decoded["candidates"].isEmpty) {
-              print('[OCR] No candidates in response');
-              return {};
-            }
-
-            // Handle blocked content
-            if (decoded["candidates"][0].containsKey("finishReason")) {
-              final reason = decoded["candidates"][0]["finishReason"];
-              if (reason == "SAFETY" || reason == "RECITATION") {
-                print('[OCR] Content blocked: $reason');
-                return {};
-              }
-            }
-
-            final text =
-                decoded["candidates"][0]["content"]["parts"][0]["text"];
-            print('[OCR] ===== GEMINI EXTRACTION RESPONSE =====');
-            print(text);
-            print('[OCR] ===== END RESPONSE =====');
-
-            return _validateAndSanitize(text, rawText);
-          } else {
-            print(
-              '[OCR] Gemini Error: ${response.statusCode} - ${response.body}',
-            );
-          }
-        } catch (e) {
-          print('[OCR] Attempt ${attempt + 1} failed: $e');
-          if (attempt < 1) {
-            await Future.delayed(const Duration(seconds: 2));
+        // Handle blocked content
+        if (decoded['candidates'][0].containsKey('finishReason')) {
+          final reason = decoded['candidates'][0]['finishReason'];
+          if (reason == 'SAFETY' || reason == 'RECITATION') {
+            print('[OCR] Content blocked: $reason');
+            return {};
           }
         }
+
+        final text = decoded['candidates'][0]['content']['parts'][0]['text'];
+        print('[OCR] ===== GEMINI EXTRACTION RESPONSE =====');
+        print(text);
+        print('[OCR] ===== END RESPONSE =====');
+
+        return _validateAndSanitize(text, rawText);
       }
 
       return {};
@@ -435,13 +462,10 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     return empty;
   }
 
-  /// Preprocess OCR text to fix common OCR errors before extraction
   static String _preprocessOcrText(String text) {
-    // Apply smart character-level fixes
     return _fixCommonOcrPatterns(text);
   }
 
-  /// Smart OCR pattern fixing based on common character confusions
   static String _fixCommonOcrPatterns(String text) {
     StringBuffer result = StringBuffer();
 
@@ -450,35 +474,29 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       String next = i + 1 < text.length ? text[i + 1] : '';
       String prev = i > 0 ? text[i - 1] : '';
 
-      // Fix 'rn' that should be 'm' (common OCR mistake)
-      // Only in middle of words (not at boundaries)
       if (current == 'r' &&
           next == 'n' &&
           _isLetter(prev) &&
           i + 2 < text.length &&
           _isLetter(text[i + 2])) {
         result.write('m');
-        i++; // Skip the 'n'
+        i++;
         continue;
       }
 
-      // Fix 'l' at start of common words that should be 'I'
       if (current == 'l' &&
           (prev == '' || prev == ' ') &&
           next != '' &&
           next.toLowerCase() == next) {
-        // Likely should be capital I (like Ibrahim, Intelligence, Islam)
         result.write('I');
         continue;
       }
 
-      // Fix '0' (zero) in names - should be 'o' or 'O'
       if (current == '0' && _isLetter(prev) && _isLetter(next)) {
         result.write(prev == prev.toUpperCase() ? 'O' : 'o');
         continue;
       }
 
-      // Fix '1' (one) in names - should be 'l' or 'I'
       if (current == '1' && _isLetter(prev) && _isLetter(next)) {
         result.write(prev == prev.toUpperCase() ? 'I' : 'l');
         continue;
@@ -490,13 +508,11 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     return result.toString();
   }
 
-  /// Clean abstract or description by removing labels and page numbers
   static String _cleanAbstractOrDescription(String text) {
     if (text.isEmpty) return text;
 
     String cleaned = text.trim();
 
-    // Remove label at the beginning (case-insensitive)
     cleaned = cleaned.replaceAll(
       RegExp(r'^abstract\s*:?\s*', caseSensitive: false),
       '',
@@ -506,41 +522,26 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       '',
     );
 
-    // Remove page numbers at the end
-    // Patterns: "Page 4 87", "Page 4", "P. 87", "pg. 12", "page 87", etc.
     cleaned = cleaned.replaceAll(
       RegExp(r'\s*(?:page|pg?\.?)\s*\d+(?:\s+\d+)?\s*$', caseSensitive: false),
       '',
     );
 
-    // Remove standalone numbers at the end that look like page numbers (2-3 digits)
     cleaned = cleaned.replaceAll(RegExp(r'\s+\d{1,3}\s*$'), '');
-
-    // Remove common OCR artifacts at the end
-    cleaned = cleaned.replaceAll(
-      RegExp(r'\s*[|]\s*\d+\s*$'),
-      '',
-    ); // "text | 87"
-
-    // Clean up extra whitespace
+    cleaned = cleaned.replaceAll(RegExp(r'\s*[|]\s*\d+\s*$'), '');
     cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
 
     return cleaned;
   }
 
-  /// Clean keywords by removing the "Keywords:" label
   static String _cleanKeywords(String text) {
     if (text.isEmpty) return text;
 
     String cleaned = text.trim();
-
-    // Remove "Keywords:" label at the beginning
     cleaned = cleaned.replaceAll(
       RegExp(r'^keywords?\s*:?\s*', caseSensitive: false),
       '',
     );
-
-    // Clean up extra whitespace
     cleaned = cleaned.replaceAll(RegExp(r'\s+'), ' ').trim();
 
     return cleaned;
@@ -562,26 +563,25 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     Map<String, dynamic> finalData = {};
 
     for (var key in [
-      "title",
-      "students",
-      "supervisor",
-      "year",
-      "abstract",
-      "technologies",
-      "description",
-      "keywords",
-      "category",
+      'title',
+      'students',
+      'supervisor',
+      'year',
+      'abstract',
+      'technologies',
+      'description',
+      'keywords',
+      'category',
     ]) {
-      String regexValue = regexData[key]?['value'] ?? "";
+      String regexValue = regexData[key]?['value'] ?? '';
       double regexConfidence = regexData[key]?['confidence'] ?? 0.0;
 
-      String aiValue = aiData[key] ?? "";
+      String aiValue = aiData[key] ?? '';
       double aiConfidence = _calculateAIConfidence(aiValue);
 
       String finalValue;
 
-      // Special handling for students - prefer AI if it has content
-      if (key == "students") {
+      if (key == 'students') {
         if (aiValue.isNotEmpty) {
           finalValue = aiValue;
           print('[OCR] Using AI students (preferred): "$finalValue"');
@@ -589,32 +589,27 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
           finalValue = regexValue;
           print('[OCR] Using regex students (fallback): "$finalValue"');
         } else {
-          finalValue = "";
+          finalValue = '';
           print('[OCR] WARNING: No students found by either method!');
         }
-      }
-      // NEVER extract abstract or description - always empty
-      else if (key == "abstract" || key == "description") {
-        finalValue = "";
+      } else if (key == 'abstract' || key == 'description') {
+        finalValue = '';
         aiConfidence = 0.0;
         regexConfidence = 0.0;
-      }
-      // For other fields, prefer AI if it has content and higher confidence
-      else if (aiValue.isNotEmpty && aiConfidence >= regexConfidence) {
+      } else if (aiValue.isNotEmpty && aiConfidence >= regexConfidence) {
         finalValue = aiValue;
       } else if (regexValue.isNotEmpty) {
         finalValue = regexValue;
       } else {
-        finalValue = "";
+        finalValue = '';
       }
 
-      // Combined confidence for transparency
       double combinedConfidence = _combineConfidence(
         regexScore: regexConfidence,
         aiScore: aiConfidence,
       );
 
-      finalData[key] = {"value": finalValue, "confidence": combinedConfidence};
+      finalData[key] = {'value': finalValue, 'confidence': combinedConfidence};
 
       print(
         '[OCR] $key: "${finalValue.length > 50 ? finalValue.substring(0, 50) + "..." : finalValue}" (AI: $aiConfidence, Regex: $regexConfidence, Final: $combinedConfidence)',
@@ -649,7 +644,6 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     String rawJson,
     String originalText,
   ) {
-    // FIRST: Try to extract students from incomplete/broken JSON
     String preExtractedStudents = _preExtractStudents(rawJson);
     if (preExtractedStudents.isNotEmpty) {
       print(
@@ -658,19 +652,14 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     }
 
     try {
-      // Clean up markdown code blocks and whitespace
       String cleaned = rawJson
-          .replaceAll("```json", "")
-          .replaceAll("```", "")
+          .replaceAll('```json', '')
+          .replaceAll('```', '')
           .trim();
 
-      // CRITICAL FIX: Fix incomplete JSON by adding missing closing quotes/braces
       cleaned = _fixIncompleteJson(cleaned);
-
-      // CRITICAL FIX: Remove newlines inside JSON strings
       cleaned = _fixMultilineJsonStrings(cleaned);
 
-      // Try to extract JSON if there's extra text
       final jsonMatch = RegExp(
         r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',
         dotAll: true,
@@ -685,32 +674,29 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
 
       Map<String, dynamic> safe = {};
 
-      // Normalize original text for better matching
       String normalizedOriginal = originalText
           .toLowerCase()
           .replaceAll(RegExp(r'\s+'), ' ')
           .trim();
 
       for (var key in [
-        "title",
-        "students",
-        "supervisor",
-        "year",
-        "abstract",
-        "technologies",
-        "description",
-        "keywords",
-        "category",
+        'title',
+        'students',
+        'supervisor',
+        'year',
+        'abstract',
+        'technologies',
+        'description',
+        'keywords',
+        'category',
       ]) {
-        // Force abstract and description to always be empty
-        if (key == "abstract" || key == "description") {
-          safe[key] = "";
+        if (key == 'abstract' || key == 'description') {
+          safe[key] = '';
           continue;
         }
 
-        // Special handling for students if it comes as a list
         dynamic rawValue = decoded[key];
-        String value = "";
+        String value = '';
 
         if (rawValue != null) {
           if (rawValue is List) {
@@ -721,8 +707,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
           }
         }
 
-        // Use pre-extracted students if JSON decoding didn't get it or got empty
-        if (key == "students" &&
+        if (key == 'students' &&
             (value.isEmpty || value.length < 3) &&
             preExtractedStudents.isNotEmpty) {
           value = preExtractedStudents;
@@ -730,39 +715,30 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
         }
 
         if (value.isEmpty) {
-          safe[key] = "";
+          safe[key] = '';
           continue;
         }
 
-        // Clean up abstract and description fields
-        if (key == "abstract" || key == "description") {
+        if (key == 'abstract' || key == 'description') {
           value = _cleanAbstractOrDescription(value);
-          print('[OCR] Cleaned $key: "$value"');
         }
 
-        // Clean up keywords field
-        if (key == "keywords") {
+        if (key == 'keywords') {
           value = _cleanKeywords(value);
-          print('[OCR] Cleaned keywords: "$value"');
         }
 
-        // Skip validation for students since names can be fragmented across OCR lines
-        if (key == "students") {
+        if (key == 'students') {
           safe[key] = value;
           print('[OCR] Students accepted without validation: "$value"');
           continue;
         }
 
-        // Apply OCR corrections to supervisor names
-        if (key == "supervisor" && value.isNotEmpty) {
+        if (key == 'supervisor' && value.isNotEmpty) {
           value = _correctOcrErrors(value);
-          print('[OCR] Supervisor after OCR correction: "$value"');
         }
 
-        // Relaxed validation - check if key parts exist in original
         bool isValid = _validateExtraction(value, normalizedOriginal, key);
-
-        safe[key] = isValid ? value : "";
+        safe[key] = isValid ? value : '';
 
         if (!isValid) {
           print(
@@ -776,23 +752,13 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       print('[OCR] JSON parse error: $e');
       print('[OCR] Attempting comprehensive fallback extraction...');
 
-      // Comprehensive fallback extraction
       final fallbackData = _extractFieldsWithRegex(rawJson, originalText);
 
-      // Use pre-extracted students if fallback didn't find any
       if ((fallbackData['students'] == null ||
               fallbackData['students']!.isEmpty) &&
           preExtractedStudents.isNotEmpty) {
         fallbackData['students'] = preExtractedStudents;
-        print(
-          '[OCR] Using pre-extracted students in fallback: "$preExtractedStudents"',
-        );
       }
-
-      print('[OCR] Fallback extraction results:');
-      fallbackData.forEach((key, value) {
-        print('[OCR]   $key: "$value"');
-      });
 
       return fallbackData;
     }
@@ -819,12 +785,10 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     }
 
     if (quoteCount % 2 == 1) {
-      print('[OCR] Fixing unclosed string');
       json = json + '"';
     }
 
     while (closeBraces < openBraces) {
-      print('[OCR] Adding missing closing brace');
       json = json + '}';
       closeBraces++;
     }
@@ -864,7 +828,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       }
     }
 
-    return "";
+    return '';
   }
 
   static String _fixMultilineJsonStrings(String json) {
@@ -931,12 +895,12 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       if (match != null) {
         extracted[key] = match.group(1)!.trim();
       } else {
-        extracted[key] = "";
+        extracted[key] = '';
       }
     }
 
-    extracted['abstract'] = "";
-    extracted['description'] = "";
+    extracted['abstract'] = '';
+    extracted['description'] = '';
 
     String students = _extractStudentsFromRawResponse(
       rawResponse,
@@ -956,8 +920,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       dotAll: true,
     ).firstMatch(rawResponse);
     if (match != null && match.group(1)!.trim().isNotEmpty) {
-      String extracted = match.group(1)!.trim().replaceAll(RegExp(r'\s+'), ' ');
-      return extracted;
+      return match.group(1)!.trim().replaceAll(RegExp(r'\s+'), ' ');
     }
 
     match = RegExp(
@@ -976,12 +939,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       }
     }
 
-    String heuristic = _extractStudents(originalText);
-    if (heuristic.isNotEmpty) {
-      return heuristic;
-    }
-
-    return "";
+    return _extractStudents(originalText);
   }
 
   static bool _validateExtraction(
@@ -989,7 +947,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     String originalText,
     String field,
   ) {
-    if (field == "year") {
+    if (field == 'year') {
       return RegExp(r'^20\d{2}$').hasMatch(value);
     }
 
@@ -1021,24 +979,23 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
 
   static Map<String, dynamic> _extractHeuristically(String rawText) {
     Map<String, dynamic> data = {};
-
     String text = rawText.replaceAll('\r\n', '\n');
 
-    _addField(data, "year", _extractYear(text));
-    _addField(data, "supervisor", _extractSupervisor(text));
-    _addField(data, "technologies", _extractTechnologies(text));
-    _addField(data, "abstract", "");
-    _addField(data, "title", _guessTitle(text));
-    _addField(data, "students", _extractStudents(text));
-    _addField(data, "category", _guessCategory(text));
-    _addField(data, "description", "");
-    _addField(data, "keywords", "");
+    _addField(data, 'year', _extractYear(text));
+    _addField(data, 'supervisor', _extractSupervisor(text));
+    _addField(data, 'technologies', _extractTechnologies(text));
+    _addField(data, 'abstract', '');
+    _addField(data, 'title', _guessTitle(text));
+    _addField(data, 'students', _extractStudents(text));
+    _addField(data, 'category', _guessCategory(text));
+    _addField(data, 'description', '');
+    _addField(data, 'keywords', '');
 
     return data;
   }
 
   static void _addField(Map<String, dynamic> map, String key, String value) {
-    map[key] = {"value": value, "confidence": _calculateRegexConfidence(value)};
+    map[key] = {'value': value, 'confidence': _calculateRegexConfidence(value)};
   }
 
   static double _calculateRegexConfidence(String value) {
@@ -1073,12 +1030,10 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     }
 
     if (supervisorName.isEmpty) {
-      final titlePattern = RegExp(
+      final match = RegExp(
         r'(?:dr\.|prof\.|mr\.|ms\.|mrs\.)\s+[a-z]+(?:\s+[a-z]+)?',
         caseSensitive: false,
-      );
-
-      final match = titlePattern.firstMatch(fullText);
+      ).firstMatch(fullText);
       if (match != null) {
         supervisorName = match.group(0)!.trim();
       }
@@ -1091,7 +1046,6 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     return supervisorName;
   }
 
-  /// Smart OCR error correction using pattern analysis
   static String _correctOcrErrors(String text) {
     if (text.isEmpty) return text;
 
@@ -1105,17 +1059,12 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
 
       String cleanWord = word.toLowerCase().replaceAll('.', '');
 
-      if (cleanWord == 'dr' ||
-          cleanWord == 'prof' ||
-          cleanWord == 'mr' ||
-          cleanWord == 'ms' ||
-          cleanWord == 'mrs') {
+      if (['dr', 'prof', 'mr', 'ms', 'mrs'].contains(cleanWord)) {
         correctedWords.add(_capitalizeTitle(cleanWord));
         continue;
       }
 
-      String correctedWord = _smartCorrectWord(word);
-      correctedWords.add(correctedWord);
+      correctedWords.add(_smartCorrectWord(word));
     }
 
     return correctedWords.join(' ');
@@ -1219,9 +1168,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
           ? text.substring(startPos - 50, startPos)
           : text.substring(0, startPos);
 
-      if (monthPattern.hasMatch(beforeText)) {
-        continue;
-      }
+      if (monthPattern.hasMatch(beforeText)) continue;
 
       lastValidYear = match.group(1)!;
     }
@@ -1248,7 +1195,6 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       }
 
       if (RegExp(r'^\d+\s*[-–]').hasMatch(clean)) continue;
-
       if (clean.length < 15) continue;
 
       if (clean.length >= 20 && clean.length < 150) {
@@ -1427,9 +1373,7 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
       for (var keyword in entry.value) {
         if (lower.contains(keyword)) count++;
       }
-      if (count > 0) {
-        scores[entry.key] = count;
-      }
+      if (count > 0) scores[entry.key] = count;
     }
 
     if (scores.isNotEmpty) {
@@ -1451,7 +1395,6 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     );
 
     final matches = numberedPattern.allMatches(fullText);
-    print('[OCR] Found ${matches.length} numbered patterns in text');
 
     for (var match in matches) {
       String number = match.group(1)!;
@@ -1484,7 +1427,6 @@ RETURN ONLY THE COMPLETE, VALID JSON OBJECT.
     if (names.isNotEmpty) {
       List<String> uniqueNames = [];
       Set<String> seen = {};
-
       for (var name in names) {
         String normalized = name.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
         if (!seen.contains(normalized)) {
