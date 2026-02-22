@@ -12,7 +12,11 @@ class ProjectInfo {
   final String supervisorName;
   final String year;
   final String rawOcrText;
-  final bool isSynced; // <--- This is the missing field causing your errors
+  final bool isSynced;
+  // ── New fields ──────────────────────────────────────────────────────────────
+  final String problem;
+  final String solution;
+  final String objectives;
 
   ProjectInfo({
     this.id,
@@ -26,10 +30,12 @@ class ProjectInfo {
     required this.supervisorName,
     required this.year,
     required this.rawOcrText,
-    this.isSynced = false, // Default to false (not synced yet)
+    this.isSynced = false,
+    this.problem = '',
+    this.solution = '',
+    this.objectives = '',
   });
 
-  // This method allows you to update specific fields (like setting isSynced to true)
   ProjectInfo copyWith({
     int? id,
     String? title,
@@ -43,6 +49,9 @@ class ProjectInfo {
     String? year,
     String? rawOcrText,
     bool? isSynced,
+    String? problem,
+    String? solution,
+    String? objectives,
   }) {
     return ProjectInfo(
       id: id ?? this.id,
@@ -57,10 +66,12 @@ class ProjectInfo {
       year: year ?? this.year,
       rawOcrText: rawOcrText ?? this.rawOcrText,
       isSynced: isSynced ?? this.isSynced,
+      problem: problem ?? this.problem,
+      solution: solution ?? this.solution,
+      objectives: objectives ?? this.objectives,
     );
   }
 
-  // Convert object to Map for Hive database
   Map<String, dynamic> toMap() {
     return {
       'title': title,
@@ -73,11 +84,13 @@ class ProjectInfo {
       'supervisorName': supervisorName,
       'year': year,
       'rawOcrText': rawOcrText,
-      'isSynced': isSynced, // Save the sync status
+      'isSynced': isSynced,
+      'problem': problem,
+      'solution': solution,
+      'objectives': objectives,
     };
   }
 
-  // Create object from Hive database Map
   factory ProjectInfo.fromMap(int key, Map<dynamic, dynamic> raw) {
     final map = Map<String, dynamic>.from(raw);
     return ProjectInfo(
@@ -86,13 +99,28 @@ class ProjectInfo {
       abstractText: (map['abstractText'] as String?) ?? '',
       description: (map['description'] as String?) ?? '',
       category: (map['category'] as String?) ?? '',
-      technologies: (map['technologies'] as String?)?.split(',').where((e) => e.isNotEmpty).toList() ?? [],
-      extractedKeywords: (map['extractedKeywords'] as String?)?.split(',').where((e) => e.isNotEmpty).toList() ?? [],
-      studentNames: (map['studentNames'] as String?)?.split('|').where((e) => e.isNotEmpty).toList() ?? [],
+      technologies: (map['technologies'] as String?)
+              ?.split(',')
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          [],
+      extractedKeywords: (map['extractedKeywords'] as String?)
+              ?.split(',')
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          [],
+      studentNames: (map['studentNames'] as String?)
+              ?.split('|')
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          [],
       supervisorName: (map['supervisorName'] as String?) ?? '',
       year: (map['year'] as String?) ?? '',
       rawOcrText: (map['rawOcrText'] as String?) ?? '',
-      isSynced: (map['isSynced'] as bool?) ?? false, // Load the sync status
+      isSynced: (map['isSynced'] as bool?) ?? false,
+      problem: (map['problem'] as String?) ?? '',
+      solution: (map['solution'] as String?) ?? '',
+      objectives: (map['objectives'] as String?) ?? '',
     );
   }
 }

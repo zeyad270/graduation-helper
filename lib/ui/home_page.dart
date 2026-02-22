@@ -1,17 +1,32 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // For Clipboard
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/project_info.dart';
 import '../services/database_service.dart';
 import '../services/google_sheets_service.dart';
-import '../services/image_service.dart';
 import '../services/ocr_service.dart';
-import '../utils/text_utils.dart';
+
+// ─── Design Tokens ────────────────────────────────────────────────────────────
+class _AppColors {
+  static const bg = Color(0xFFF0F2F8);
+  static const surface = Colors.white;
+  static const primary = Color(0xFF1A1A2E);
+  static const accent = Color(0xFF4F46E5);
+  static const accentLight = Color(0xFFEEF2FF);
+  static const success = Color(0xFF059669);
+  static const successLight = Color(0xFFECFDF5);
+  static const warning = Color(0xFFD97706);
+  static const warningLight = Color(0xFFFFFBEB);
+  static const danger = Color(0xFFDC2626);
+  static const textPrimary = Color(0xFF111827);
+  static const textSecondary = Color(0xFF6B7280);
+  static const border = Color(0xFFE5E7EB);
+  static const cardShadow = Color(0x0A000000);
+}
 
 class OCRHomePage extends StatefulWidget {
   const OCRHomePage({super.key});
@@ -25,126 +40,126 @@ class _OCRHomePageState extends State<OCRHomePage>
   @override
   bool get wantKeepAlive => true;
 
-  // Navigation State
+  // ── Navigation ──────────────────────────────────────────────────────────────
   late TabController _tabController;
   int _currentIndex = 0;
 
-  // Data State
+  // ── State ───────────────────────────────────────────────────────────────────
   final ImagePicker _picker = ImagePicker();
-  final List<XFile> _pages = [];
-  String _fullText = '';
+  final List<Map<String, dynamic>> _scannedDocs = [];
+
   bool _isProcessing = false;
-  bool _isFillingAll = false; // <-- new: tracks batch fill state
+  String _processingStep = '';
+  double _processingProgress = 0.0;
+
   List<ProjectInfo> _projects = [];
   int? _editingProjectId;
+  Map<String, dynamic> _lastExtracted = {}; // stores last extraction result for summary
 
-  // Controllers
-  final _titleController = TextEditingController();
-  final _abstractController = TextEditingController();
-  final _descriptionController = TextEditingController();
-  final _categoryController = TextEditingController();
-  final _technologiesController = TextEditingController();
+  // ── Form Controllers ────────────────────────────────────────────────────────
+  final _titleCtrl        = TextEditingController();
+  final _abstractCtrl     = TextEditingController();
+  final _descCtrl         = TextEditingController();
+  final _categoryCtrl     = TextEditingController();
+  final _techCtrl         = TextEditingController();
+  final _supervisorCtrl   = TextEditingController();
+  final _yearCtrl         = TextEditingController(text: DateTime.now().year.toString());
+  final _keywordsCtrl     = TextEditingController();
+  final _problemCtrl      = TextEditingController();   // NEW
+  final _solutionCtrl     = TextEditingController();   // NEW
+  final _objectivesCtrl   = TextEditingController();   // NEW
+  final _studentEntryCtrl = TextEditingController();
+  List<String> _studentNames = [];
 
-  // Student List Logic
-  final _studentEntryController = TextEditingController();
-  List<String> _studentNamesList = [];
-
-  final _supervisorController = TextEditingController();
-  final _yearController = TextEditingController(
-    text: DateTime.now().year.toString(),
-  );
-  final _keywordsController = TextEditingController();
-
+  // ── Lifecycle ────────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
     _tabController.addListener(() {
       if (_tabController.indexIsChanging) {
-        setState(() {
-          _currentIndex = _tabController.index;
-        });
+        setState(() => _currentIndex = _tabController.index);
       }
     });
-
     _loadProjects();
     _restoreDraft();
 
-    // Auto-Save Listeners
-    _titleController.addListener(_saveDraft);
-    _abstractController.addListener(_saveDraft);
-    _descriptionController.addListener(_saveDraft);
-    _categoryController.addListener(_saveDraft);
-    _technologiesController.addListener(_saveDraft);
-    _supervisorController.addListener(_saveDraft);
-    _keywordsController.addListener(_saveDraft);
+    for (final ctrl in [
+      _titleCtrl, _abstractCtrl, _descCtrl, _categoryCtrl,
+      _techCtrl, _supervisorCtrl, _keywordsCtrl,
+      _problemCtrl, _solutionCtrl, _objectivesCtrl,
+    ]) {
+      ctrl.addListener(_saveDraft);
+    }
   }
 
   @override
   void dispose() {
     _tabController.dispose();
-    _titleController.dispose();
-    _abstractController.dispose();
-    _descriptionController.dispose();
-    _categoryController.dispose();
-    _technologiesController.dispose();
-    _studentEntryController.dispose();
-    _supervisorController.dispose();
-    _yearController.dispose();
-    _keywordsController.dispose();
+    for (final ctrl in [
+      _titleCtrl, _abstractCtrl, _descCtrl, _categoryCtrl,
+      _techCtrl, _supervisorCtrl, _yearCtrl, _keywordsCtrl,
+      _problemCtrl, _solutionCtrl, _objectivesCtrl,
+      _studentEntryCtrl,
+    ]) {
+      ctrl.dispose();
+    }
     super.dispose();
   }
 
+  // ── Data ─────────────────────────────────────────────────────────────────────
   Future<void> _loadProjects() async {
     final list = await DatabaseService.getAllProjects();
     if (mounted) setState(() => _projects = list);
   }
 
-  // --- 0. Auto-Save Logic ---
   Future<void> _saveDraft() async {
     if (_editingProjectId != null) return;
-
     final prefs = await SharedPreferences.getInstance();
-    final draftData = {
-      'title': _titleController.text,
-      'abstract': _abstractController.text,
-      'desc': _descriptionController.text,
-      'cat': _categoryController.text,
-      'tech': _technologiesController.text,
-      'sup': _supervisorController.text,
-      'key': _keywordsController.text,
-      'students': _studentNamesList,
-      'raw': _fullText,
-    };
-    await prefs.setString('draft_form', jsonEncode(draftData));
+    await prefs.setString('draft_form', jsonEncode({
+      'title':      _titleCtrl.text,
+      'abstract':   _abstractCtrl.text,
+      'desc':       _descCtrl.text,
+      'cat':        _categoryCtrl.text,
+      'tech':       _techCtrl.text,
+      'sup':        _supervisorCtrl.text,
+      'key':        _keywordsCtrl.text,
+      'problem':    _problemCtrl.text,
+      'solution':   _solutionCtrl.text,
+      'objectives': _objectivesCtrl.text,
+      'students':   _studentNames,
+      'docs':       _scannedDocs.map((d) => d['rawText'] as String).toList(),
+    }));
   }
 
   Future<void> _restoreDraft() async {
     final prefs = await SharedPreferences.getInstance();
-    final draftString = prefs.getString('draft_form');
-    if (draftString != null && draftString.isNotEmpty) {
-      try {
-        final data = jsonDecode(draftString);
-        setState(() {
-          _titleController.text = data['title'] ?? '';
-          _abstractController.text = data['abstract'] ?? '';
-          _descriptionController.text = data['desc'] ?? '';
-          _categoryController.text = data['cat'] ?? '';
-          _technologiesController.text = data['tech'] ?? '';
-          _supervisorController.text = data['sup'] ?? '';
-          _keywordsController.text = data['key'] ?? '';
-          _fullText = data['raw'] ?? '';
-          if (data['students'] != null) {
-            _studentNamesList = List<String>.from(data['students']);
+    final s = prefs.getString('draft_form');
+    if (s == null) return;
+    try {
+      final d = jsonDecode(s);
+      setState(() {
+        _titleCtrl.text      = d['title']      ?? '';
+        _abstractCtrl.text   = d['abstract']   ?? '';
+        _descCtrl.text       = d['desc']        ?? '';
+        _categoryCtrl.text   = d['cat']         ?? '';
+        _techCtrl.text       = d['tech']        ?? '';
+        _supervisorCtrl.text = d['sup']         ?? '';
+        _keywordsCtrl.text   = d['key']         ?? '';
+        _problemCtrl.text    = d['problem']     ?? '';
+        _solutionCtrl.text   = d['solution']    ?? '';
+        _objectivesCtrl.text = d['objectives']  ?? '';
+        if (d['students'] != null) _studentNames = List<String>.from(d['students']);
+        if (d['docs'] != null) {
+          for (final raw in List<String>.from(d['docs'])) {
+            if (raw.isNotEmpty) {
+              _scannedDocs.add({'image': null, 'rawText': raw, 'label': 'Restored doc', 'isLoading': false});
+            }
           }
-        });
-        if (_titleController.text.isNotEmpty) {
-          _showSnack('Draft restored', isSuccess: true);
         }
-      } catch (e) {
-        debugPrint("Error restoring draft: $e");
-      }
-    }
+      });
+      if (_titleCtrl.text.isNotEmpty) _showSnack('Draft restored', type: SnackType.success);
+    } catch (_) {}
   }
 
   Future<void> _clearDraft() async {
@@ -152,453 +167,202 @@ class _OCRHomePageState extends State<OCRHomePage>
     await prefs.remove('draft_form');
   }
 
-  // --- Confirmation Dialogs ---
-  Future<void> _confirmClearForm() async {
-    final confirmed = await _showConfirmDialog(
-      'Clear Form?',
-      'This will wipe all text and images.',
-    );
-    if (confirmed) {
-      _clearForm();
-      _showSnack('Form cleared', isSuccess: true);
-    }
-  }
-
-  Future<void> _confirmDeleteAllProjects() async {
-    final confirmed = await _showConfirmDialog(
-      'Delete All Projects?',
-      'This will permanently delete all saved projects from the device.',
-    );
-    if (confirmed) {
-      for (var p in _projects) {
-        if (p.id != null) {
-          await DatabaseService.deleteProject(p.id!);
-        }
-      }
-      _loadProjects();
-      _showSnack('All projects deleted', isSuccess: true);
-    }
-  }
-
-  Future<bool> _showConfirmDialog(String title, String content) async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Confirm', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
-  }
-
-  // --- Image Source Selection Dialog ---
-  Future<ImageSource?> _showImageSourceDialog() async {
-    return await showDialog<ImageSource>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Choose Image Source'),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(
-                Icons.camera_alt,
-                color: Colors.indigo,
-                size: 32,
-              ),
-              title: const Text(
-                'Camera',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              subtitle: const Text('Take a photo'),
-              onTap: () => Navigator.pop(ctx, ImageSource.camera),
-            ),
-            const Divider(),
-            ListTile(
-              leading: const Icon(
-                Icons.photo_library,
-                color: Colors.indigo,
-                size: 32,
-              ),
-              title: const Text(
-                'Gallery',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              subtitle: const Text('Choose from photos'),
-              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // --- 1. OCR Logic ---
-  Future<void> _addPage(ImageSource source) async {
-    if (source == ImageSource.camera) {
-      final img = await _picker.pickImage(source: ImageSource.camera);
-      if (img != null) setState(() => _pages.add(img));
-    } else {
-      final images = await _picker.pickMultiImage();
-      if (images.isNotEmpty) setState(() => _pages.addAll(images));
-    }
-  }
-
-  Future<void> _scanAndAppend(TextEditingController controller) async {
-    final ImageSource? source = await _showImageSourceDialog();
-    if (source == null) return;
-
+  // ── Image Picking ────────────────────────────────────────────────────────────
+  Future<void> _pickAndAddDocument(ImageSource source) async {
     try {
-      final img = await _picker.pickImage(source: source);
-      if (img == null) return;
-
-      _showSnack('Processing image...', isSuccess: true);
-
-      final processedFile = await ImageService.preprocessImage(img.path);
-      final inputImage = InputImage.fromFilePath(processedFile.path);
-      final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-
-      final result = await recognizer.processImage(inputImage);
-      final cleanText = TextUtils.cleanOcrText(result.text);
-
-      setState(() {
-        if (controller.text.isNotEmpty) {
-          controller.text = "${controller.text}\n\n$cleanText";
-        } else {
-          controller.text = cleanText;
-        }
-        _pages.add(img);
-        _fullText = "${_fullText}\n\n--- Appended Page ---\n$cleanText";
-      });
-
-      recognizer.close();
-      _showSnack('Text appended successfully!', isSuccess: true);
+      if (source == ImageSource.gallery) {
+        final images = await _picker.pickMultiImage();
+        if (images.isEmpty) return;
+        for (final img in images) await _processAndAddImage(img);
+      } else {
+        final img = await _picker.pickImage(source: ImageSource.camera);
+        if (img == null) return;
+        await _processAndAddImage(img);
+      }
     } catch (e) {
-      _showSnack('Error appending text: $e', isError: true);
+      _showSnack('Error picking image: $e', type: SnackType.error);
     }
   }
 
-  // ─────────────────────────────────────────────
-  // BATCH FILL: one request fills ALL fields
-  // ─────────────────────────────────────────────
-  Future<void> _fillAllFieldsFromOcr() async {
-    if (_fullText.isEmpty) {
-      _showSnack('No scanned text available. Run OCR first.', isError: true);
+  Future<void> _processAndAddImage(XFile img) async {
+    // Gemini Vision reads images directly — no ML Kit OCR needed.
+    setState(() {
+      _scannedDocs.add({
+        'image':     img,
+        'rawText':   '',
+        'label':     'Page \${_scannedDocs.length + 1}',
+        'isLoading': false,
+      });
+    });
+    _saveDraft();
+  }
+
+
+
+  void _removeDoc(int index) {
+    setState(() => _scannedDocs.removeAt(index));
+    _saveDraft();
+  }
+
+  // ── AI EXTRACT ALL ────────────────────────────────────────────────────────────
+  Future<void> _aiExtractAll() async {
+    if (_scannedDocs.isEmpty) {
+      _showSnack('Add at least one document or image first', type: SnackType.error);
       return;
     }
-
-    setState(() => _isFillingAll = true);
-    _showSnack('Filling all fields with AI (1 request)...', isSuccess: true);
-
+    setState(() { _isProcessing = true; _processingStep = 'Preparing documents...'; _processingProgress = 0.1; });
     try {
-      final fields = await OcrService.extractAllFields(_fullText);
+      final imagePaths = _scannedDocs
+          .where((d) => d['image'] != null)
+          .map((d) => (d['image'] as XFile).path)
+          .toList();
+      final rawTexts = _scannedDocs
+          .map((d) => d['rawText'] as String)
+          .where((t) => t.isNotEmpty)
+          .toList();
 
-      if (fields.isEmpty) {
-        _showSnack(
-          'AI could not extract fields. Try scanning again.',
-          isError: true,
-        );
+      if (imagePaths.isEmpty && rawTexts.isEmpty) {
+        _showSnack('No text or images to process', type: SnackType.error);
         return;
       }
 
-      setState(() {
-        if (fields['title']?.isNotEmpty == true) {
-          _titleController.text = fields['title']!;
-        }
-        if (fields['supervisor']?.isNotEmpty == true) {
-          _supervisorController.text = fields['supervisor']!;
-        }
-        if (fields['year']?.isNotEmpty == true) {
-          _yearController.text = fields['year']!;
-        }
-        if (fields['category']?.isNotEmpty == true) {
-          _categoryController.text = fields['category']!;
-        }
-        if (fields['technologies']?.isNotEmpty == true) {
-          _technologiesController.text = fields['technologies']!;
-        }
-        if (fields['keywords']?.isNotEmpty == true) {
-          _keywordsController.text = fields['keywords']!;
-        }
-        if (fields['abstract']?.isNotEmpty == true) {
-          _abstractController.text = fields['abstract']!;
-        }
-        if (fields['description']?.isNotEmpty == true) {
-          _descriptionController.text = fields['description']!;
-        }
+      // Single intelligent call — vision if images exist, text fallback otherwise
+      final fields = await OcrService.extractFromAll(
+        imagePaths: imagePaths,
+        rawTexts: rawTexts,
+        onProgress: (step, progress) {
+          if (mounted) setState(() { _processingStep = step; _processingProgress = progress; });
+        },
+      );
 
-        // Handle students
-        final studentsRaw = fields['students'] ?? '';
-        if (studentsRaw.isNotEmpty) {
-          final parsed = studentsRaw
-              .split(RegExp(r'[,|;]'))
-              .map((e) => e.trim())
-              .where((e) => e.isNotEmpty && e.length > 2)
-              .toList();
-          if (parsed.isNotEmpty) {
-            _studentNamesList = parsed;
-          }
-        }
-
-        _saveDraft();
-      });
-
-      // Count how many fields were actually filled
-      final filledCount =
-          [
-            fields['title'],
-            fields['supervisor'],
-            fields['year'],
-            fields['category'],
-            fields['technologies'],
-            fields['keywords'],
-            fields['abstract'],
-            fields['description'],
-          ].where((v) => v != null && v.isNotEmpty).length +
-          (_studentNamesList.isNotEmpty ? 1 : 0);
-
-      _showSnack('✅ Filled $filledCount fields in 1 request!', isSuccess: true);
+      setState(() { _processingStep = 'Filling form...'; _processingProgress = 0.95; });
+      await Future.delayed(const Duration(milliseconds: 200));
+      _fillFormFromFields(fields);
+      _showSnack('All fields extracted!', type: SnackType.success);
     } catch (e) {
-      _showSnack('Error: $e', isError: true);
+      _showSnack('Extraction error: $e', type: SnackType.error);
     } finally {
-      if (mounted) setState(() => _isFillingAll = false);
+      if (mounted) setState(() { _isProcessing = false; _processingStep = ''; _processingProgress = 0.0; });
     }
   }
 
-  // Single-field fill (still available as override/fallback)
-  Future<void> _fillFieldFromOcr(
-    TextEditingController controller,
-    String fieldName,
-  ) async {
-    if (_fullText.isEmpty) {
-      _showSnack('No scanned text available. Run OCR first.', isError: true);
-      return;
+  void _fillFormFromFields(Map<String, dynamic> fields) {
+    String get(String key) {
+      final v = fields[key];
+      if (v == null) return '';
+      if (v is String) return v;
+      if (v is Map && v.containsKey('value')) return v['value']?.toString() ?? '';
+      return '';
     }
-
-    _showSnack('Extracting $fieldName...', isSuccess: true);
-
-    try {
-      final value = await OcrService.extractSingleField(_fullText, fieldName);
-
-      if (value.isNotEmpty) {
-        setState(() {
-          if (controller.text.isNotEmpty) {
-            controller.text = '${controller.text}\n\n$value';
-          } else {
-            controller.text = value;
-          }
-        });
-        _saveDraft();
-        _showSnack('$fieldName filled!', isSuccess: true);
-      } else {
-        _showSnack('Could not find $fieldName in scanned text.', isError: true);
-      }
-    } catch (e) {
-      _showSnack('Error: $e', isError: true);
-    }
-  }
-
-  Future<void> _runOcr() async {
-    if (_pages.isEmpty) {
-      _showSnack('Add at least one page first', isError: true);
-      return;
-    }
-
-    setState(() => _isProcessing = true);
-
-    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-    StringBuffer buffer = StringBuffer();
-
-    try {
-      for (var page in _pages) {
-        final processedFile = await ImageService.preprocessImage(page.path);
-        final inputImage = InputImage.fromFilePath(processedFile.path);
-        final result = await recognizer.processImage(inputImage);
-        buffer.writeln(TextUtils.cleanOcrText(result.text));
-      }
-
-      _fullText = buffer.toString();
-
-      await _fillForms(_fullText);
-
-      _showSnack('OCR + AI Processing Complete!', isSuccess: true);
-    } catch (e) {
-      _showSnack('OCR Error: $e', isError: true);
-    } finally {
-      recognizer.close();
-      if (mounted) setState(() => _isProcessing = false);
-    }
-  }
-
-  Future<void> _fillForms(String text) async {
-    final fields = await OcrService.processOCR(text);
-
-    if (!mounted) return;
-
     setState(() {
-      String getField(String key) {
-        final v = fields[key];
-        if (v == null) return '';
-        if (v is String) return v;
-        if (v is Map && v.containsKey('value')) return v['value'] ?? '';
-        return '';
-      }
-
-      _titleController.text = getField('title');
-      _abstractController.text = getField('abstract');
-      _descriptionController.text = getField('description');
-      _supervisorController.text = getField('supervisor');
-      _yearController.text = getField('year');
-      _technologiesController.text = getField('technologies');
-      _keywordsController.text = getField('keywords');
-      _categoryController.text = getField('category');
-
-      final studentsRaw = getField('students');
+      _titleCtrl.text      = get('title');
+      _abstractCtrl.text   = get('abstract');
+      _descCtrl.text       = get('description');
+      _supervisorCtrl.text = get('supervisor');
+      _yearCtrl.text       = get('year').isNotEmpty ? get('year') : DateTime.now().year.toString();
+      _techCtrl.text       = get('technologies');
+      _keywordsCtrl.text   = get('keywords');
+      _categoryCtrl.text   = get('category');
+      _problemCtrl.text    = get('problem');
+      _solutionCtrl.text   = get('solution');
+      _objectivesCtrl.text = get('objectives');
+      final studentsRaw    = get('students');
       if (studentsRaw.isNotEmpty) {
-        _studentNamesList = studentsRaw
-            .split(RegExp(r'[,|;]'))
-            .map((e) => e.trim())
-            .where((e) => e.isNotEmpty && e.length > 2)
-            .toList();
-      } else {
-        _studentNamesList.clear();
+        _studentNames = studentsRaw.split(RegExp(r'[,;|]')).map((e) => e.trim()).where((e) => e.length > 2).toList();
       }
-
-      _saveDraft();
     });
+    _lastExtracted = fields;
+    _saveDraft();
   }
 
-  // --- 2. Saving & Editing Logic ---
+  // ── Single-field re-extract ───────────────────────────────────────────────────
+  Future<void> _reExtractField(TextEditingController ctrl, String fieldName) async {
+    final imagePaths = _scannedDocs
+        .where((d) => d['image'] != null)
+        .map((d) => (d['image'] as XFile).path)
+        .toList();
+    final allText = _scannedDocs
+        .map((d) => d['rawText'] as String)
+        .where((t) => t.isNotEmpty)
+        .join('\n\n');
+
+    if (imagePaths.isEmpty && allText.isEmpty) {
+      _showSnack('Add document pages first', type: SnackType.error);
+      return;
+    }
+
+    _showSnack('Re-extracting $fieldName...', type: SnackType.info);
+
+    final value = await OcrService.extractSingleField(
+      fieldName,
+      imagePaths: imagePaths,
+      fallbackText: allText,
+    );
+
+    if (value.isNotEmpty) {
+      setState(() => ctrl.text = value);
+      _saveDraft();
+      _showSnack('$fieldName updated!', type: SnackType.success);
+    } else {
+      _showSnack('Could not extract $fieldName — try Extract All instead', type: SnackType.warning);
+    }
+  }
+
+  // ── Save / Edit ───────────────────────────────────────────────────────────────
   void _startEditing(ProjectInfo project) {
     setState(() {
-      _editingProjectId = project.id;
-      _titleController.text = project.title;
-      _abstractController.text = project.abstractText;
-      _descriptionController.text = project.description;
-      _categoryController.text = project.category;
-      _technologiesController.text = project.technologies.join(', ');
-      _keywordsController.text = project.extractedKeywords.join(', ');
-      _studentNamesList = List.from(project.studentNames);
-      _supervisorController.text = project.supervisorName;
-      _yearController.text = project.year;
-      _fullText = project.rawOcrText;
-      _pages.clear();
+      _editingProjectId    = project.id;
+      _titleCtrl.text      = project.title;
+      _abstractCtrl.text   = project.abstractText;
+      _descCtrl.text       = project.description;
+      _categoryCtrl.text   = project.category;
+      _techCtrl.text       = project.technologies.join(', ');
+      _keywordsCtrl.text   = project.extractedKeywords.join(', ');
+      _studentNames        = List.from(project.studentNames);
+      _supervisorCtrl.text = project.supervisorName;
+      _yearCtrl.text       = project.year;
+      _problemCtrl.text    = project.problem;
+      _solutionCtrl.text   = project.solution;
+      _objectivesCtrl.text = project.objectives;
+      _scannedDocs.clear();
+      if (project.rawOcrText.isNotEmpty) {
+        _scannedDocs.add({'image': null, 'rawText': project.rawOcrText, 'label': 'Original text', 'isLoading': false});
+      }
       _tabController.animateTo(0);
     });
   }
 
-  void _cancelEditing() {
-    _clearForm();
-    FocusScope.of(context).unfocus();
-  }
-
-  void _addStudent() {
-    final name = _studentEntryController.text.trim();
-    if (name.isNotEmpty) {
-      setState(() {
-        if (!_studentNamesList.contains(name)) {
-          _studentNamesList.add(name);
-          _saveDraft();
-        }
-        _studentEntryController.clear();
-      });
-    }
-  }
-
-  Future<void> _scanStudentNames() async {
-    final ImageSource? source = await _showImageSourceDialog();
-    if (source == null) return;
-
-    try {
-      final img = await _picker.pickImage(source: source);
-      if (img == null) return;
-
-      _showSnack('Extracting student names...', isSuccess: true);
-
-      final processedFile = await ImageService.preprocessImage(img.path);
-      final inputImage = InputImage.fromFilePath(processedFile.path);
-      final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-
-      final result = await recognizer.processImage(inputImage);
-      final cleanText = TextUtils.cleanOcrText(result.text);
-
-      List<String> extractedNames = cleanText
-          .split(RegExp(r'[,|\n]'))
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty && e.length > 2)
-          .toList();
-
-      setState(() {
-        for (var name in extractedNames) {
-          if (!_studentNamesList.contains(name)) {
-            _studentNamesList.add(name);
-          }
-        }
-        _pages.add(img);
-        _fullText = "$_fullText\n\n--- Student Names Scan ---\n$cleanText";
-        _saveDraft();
-      });
-
-      recognizer.close();
-
-      if (extractedNames.isEmpty) {
-        _showSnack('No names detected. Please add manually.', isError: true);
-      } else {
-        _showSnack('Found ${extractedNames.length} name(s)!', isSuccess: true);
-      }
-    } catch (e) {
-      _showSnack('Error extracting names: $e', isError: true);
-    }
-  }
+  void _cancelEditing() => _clearForm();
 
   Future<void> _saveLocal() async {
-    if (_titleController.text.isEmpty) {
-      _showSnack('Project Title is required', isError: true);
-      return;
-    }
+    if (_titleCtrl.text.trim().isEmpty) { _showSnack('Project Title is required', type: SnackType.error); return; }
+    final combinedRaw = _scannedDocs.map((d) => d['rawText'] as String).join('\n\n--- Page Break ---\n\n');
 
     final project = ProjectInfo(
-      id: _editingProjectId,
-      title: _titleController.text,
-      abstractText: _abstractController.text,
-      description: _descriptionController.text,
-      category: _categoryController.text,
-      technologies: _technologiesController.text
-          .split(',')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList(),
-      extractedKeywords: _keywordsController.text
-          .split(',')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList(),
-      studentNames: _studentNamesList,
-      supervisorName: _supervisorController.text,
-      year: _yearController.text,
-      rawOcrText: _fullText,
-      isSynced: false,
+      id:                _editingProjectId,
+      title:             _titleCtrl.text.trim(),
+      abstractText:      _abstractCtrl.text.trim(),
+      description:       _descCtrl.text.trim(),
+      category:          _categoryCtrl.text.trim(),
+      technologies:      _techCtrl.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList(),
+      extractedKeywords: _keywordsCtrl.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList(),
+      studentNames:      _studentNames,
+      supervisorName:    _supervisorCtrl.text.trim(),
+      year:              _yearCtrl.text.trim(),
+      rawOcrText:        combinedRaw,
+      isSynced:          false,
+      problem:           _problemCtrl.text.trim(),
+      solution:          _solutionCtrl.text.trim(),
+      objectives:        _objectivesCtrl.text.trim(),
     );
 
     if (_editingProjectId != null) {
       await DatabaseService.updateProject(project);
-      _showSnack('Project Updated!', isSuccess: true);
+      _showSnack('Project updated!', type: SnackType.success);
     } else {
       await DatabaseService.insertProject(project);
-      _showSnack('Project Saved!', isSuccess: true);
+      _showSnack('Project saved!', type: SnackType.success);
     }
-
     _clearForm();
     _loadProjects();
     _tabController.animateTo(2);
@@ -608,809 +372,1266 @@ class _OCRHomePageState extends State<OCRHomePage>
     _clearDraft();
     setState(() {
       _editingProjectId = null;
-      _pages.clear();
-      _fullText = '';
-      _titleController.clear();
-      _abstractController.clear();
-      _descriptionController.clear();
-      _categoryController.clear();
-      _technologiesController.clear();
-      _studentEntryController.clear();
-      _studentNamesList.clear();
-      _supervisorController.clear();
-      _keywordsController.clear();
-      _yearController.text = DateTime.now().year.toString();
+      _scannedDocs.clear();
+      for (final c in [
+        _titleCtrl, _abstractCtrl, _descCtrl, _categoryCtrl,
+        _techCtrl, _supervisorCtrl, _keywordsCtrl,
+        _problemCtrl, _solutionCtrl, _objectivesCtrl,
+        _studentEntryCtrl,
+      ]) { c.clear(); }
+      _studentNames.clear();
+      _lastExtracted = {};
+      _yearCtrl.text = DateTime.now().year.toString();
     });
   }
 
-  // --- 3. Sync Logic ---
+  // ── Sync ─────────────────────────────────────────────────────────────────────
   Future<void> _syncAll() async {
     final unsynced = _projects.where((p) => !p.isSynced).toList();
     if (unsynced.isEmpty) return;
-
-    _showSnack('Syncing ${unsynced.length} projects...', isSuccess: true);
+    _showSnack('Syncing ${unsynced.length} projects...', type: SnackType.info);
     int count = 0;
-    for (var p in unsynced) {
-      final success = await GoogleSheetsService.uploadProject(p);
-      if (success) {
+    for (final p in unsynced) {
+      if (await GoogleSheetsService.uploadProject(p)) {
         await DatabaseService.updateProject(p.copyWith(isSynced: true));
         count++;
       }
     }
     _loadProjects();
-    _showSnack(
-      'Batch Sync: $count/${unsynced.length} uploaded.',
-      isSuccess: true,
-    );
+    _showSnack('Synced $count / ${unsynced.length}',
+        type: count == unsynced.length ? SnackType.success : SnackType.warning);
   }
 
   void _uploadSingle(ProjectInfo p) async {
-    _showSnack('Syncing...', isSuccess: true);
-    final success = await GoogleSheetsService.uploadProject(p);
-    if (success) {
+    _showSnack('Syncing...', type: SnackType.info);
+    if (await GoogleSheetsService.uploadProject(p)) {
       await DatabaseService.updateProject(p.copyWith(isSynced: true));
       _loadProjects();
-      _showSnack('Synced successfully!', isSuccess: true);
+      _showSnack('Synced!', type: SnackType.success);
     } else {
-      _showSnack('Failed to sync.', isError: true);
+      _showSnack('Sync failed', type: SnackType.error);
     }
   }
 
-  void _showSnack(String msg, {bool isError = false, bool isSuccess = false}) {
-    Color color = Colors.grey[800]!;
-    if (isError) color = Colors.red[700]!;
-    if (isSuccess) color = Colors.green[700]!;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg, style: const TextStyle(color: Colors.white)),
-        backgroundColor: color,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+  // ── Snackbar ──────────────────────────────────────────────────────────────────
+  void _showSnack(String msg, {required SnackType type}) {
+    final colors = {SnackType.success: _AppColors.success, SnackType.error: _AppColors.danger, SnackType.warning: _AppColors.warning, SnackType.info: _AppColors.accent};
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg, style: const TextStyle(color: Colors.white)),
+      backgroundColor: colors[type],
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      duration: const Duration(seconds: 3),
+      margin: const EdgeInsets.all(12),
+    ));
   }
 
-  // --- UI BUILD ---
+  Future<bool> _confirm(String title, String body) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Text(title),
+            content: Text(body),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: _AppColors.danger, foregroundColor: Colors.white),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Confirm'),
+              ),
+            ],
+          ),
+        ) ?? false;
+  }
+
+  // ─── BUILD ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     super.build(context);
-
-    final isEditing = _editingProjectId != null;
+    final isEditing     = _editingProjectId != null;
     final unsyncedCount = _projects.where((p) => !p.isSynced).length;
 
     return Scaffold(
-      backgroundColor: Colors.grey[100],
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: isEditing ? Colors.orange[800] : Colors.indigo[800],
-        title: Text(
-          isEditing ? 'Edit Project' : 'Graduation OCR',
-          style: const TextStyle(
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-          ),
-        ),
-        bottom: TabBar(
-          controller: _tabController,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          indicatorColor: Colors.white,
-          tabs: const [
-            Tab(icon: Icon(Icons.document_scanner), text: 'Form'),
-            Tab(icon: Icon(Icons.text_snippet), text: 'Raw OCR'),
-            Tab(icon: Icon(Icons.folder), text: 'Projects'),
-          ],
-        ),
-        actions: [
-          if (isEditing)
-            IconButton(
-              icon: const Icon(Icons.close, color: Colors.white),
-              onPressed: _cancelEditing,
-              tooltip: "Cancel Edit",
-            ),
-          if (_currentIndex == 0 && !isEditing)
-            IconButton(
-              icon: const Icon(
-                Icons.delete_sweep_outlined,
-                color: Colors.white,
-              ),
-              onPressed: _confirmClearForm,
-              tooltip: "Clear Form",
-            ),
-          if (_currentIndex == 2)
-            IconButton(
-              icon: const Icon(Icons.delete_forever, color: Colors.white),
-              onPressed: _confirmDeleteAllProjects,
-              tooltip: "Delete ALL Projects",
-            ),
-        ],
-      ),
+      backgroundColor: _AppColors.bg,
+      appBar: _buildAppBar(isEditing, unsyncedCount),
       body: TabBarView(
         controller: _tabController,
-        children: [
-          _buildFormPage(isEditing),
-          _buildRawOcrPage(),
-          _buildListPage(),
-        ],
+        children: [_buildFormTab(isEditing), _buildRawTab(), _buildProjectsTab()],
       ),
-      floatingActionButton: _currentIndex == 2
-          ? FloatingActionButton.extended(
-              onPressed: unsyncedCount > 0 ? _syncAll : null,
-              backgroundColor: unsyncedCount > 0
-                  ? Colors.indigo[800]
-                  : Colors.green[600],
-              icon: Icon(
-                unsyncedCount > 0 ? Icons.cloud_upload : Icons.check_circle,
-                color: Colors.white,
-              ),
-              label: Text(
-                unsyncedCount > 0 ? 'Sync All ($unsyncedCount)' : 'All Synced',
-                style: const TextStyle(color: Colors.white),
-              ),
-            )
-          : null,
+      floatingActionButton: _currentIndex == 2 ? _buildSyncFab(unsyncedCount) : null,
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
   }
 
-  // --- TAB 1: FORM ---
-  Widget _buildFormPage(bool isEditing) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (isEditing)
-            Container(
-              margin: const EdgeInsets.only(bottom: 20),
-              padding: const EdgeInsets.all(12),
-              color: Colors.orange[50],
-              child: Row(
-                children: [
-                  const Icon(Icons.edit_note, color: Colors.orange),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      "Editing '${_titleController.text}'.",
-                      style: TextStyle(color: Colors.orange[900]),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-          if (!isEditing) ...[
-            _buildSectionHeader('1. Scan Documents'),
-            Card(
-              elevation: 2,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _buildBigButton(
-                            Icons.camera_alt,
-                            'Camera',
-                            () => _addPage(ImageSource.camera),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _buildBigButton(
-                            Icons.photo_library,
-                            'Gallery',
-                            () => _addPage(ImageSource.gallery),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    if (_pages.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: Colors.green[50],
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(
-                              Icons.check_circle,
-                              color: Colors.green,
-                              size: 20,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              '${_pages.length} pages ready',
-                              style: TextStyle(
-                                color: Colors.green[800],
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    const SizedBox(height: 12),
-                    // Extract Text button
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isProcessing ? null : _runOcr,
-                        icon: _isProcessing
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(Icons.auto_awesome),
-                        label: Text(
-                          _isProcessing
-                              ? 'Processing...'
-                              : 'Extract Text (OCR)',
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.indigo,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // ─────────────────────────────────────────────
-            // FILL ALL FIELDS BUTTON (1 AI request for everything)
-            // ─────────────────────────────────────────────
-            if (_fullText.isNotEmpty)
-              Card(
-                elevation: 3,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                color: Colors.indigo[50],
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(Icons.bolt, color: Colors.indigo[700], size: 20),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Smart Fill',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                              color: Colors.indigo[900],
-                            ),
-                          ),
-                          const Spacer(),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.green[700],
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Text(
-                              '1 request',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Fill all fields at once using a single AI call — saves your daily quota.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.indigo[700],
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: _isFillingAll
-                              ? null
-                              : _fillAllFieldsFromOcr,
-                          icon: _isFillingAll
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : const Icon(Icons.auto_fix_high),
-                          label: Text(
-                            _isFillingAll
-                                ? 'Filling all fields...'
-                                : 'Fill All Fields (AI)',
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.indigo[700],
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 13),
-                            textStyle: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-            const SizedBox(height: 12),
-          ],
-
-          _buildSectionHeader('2. Details'),
-          _buildInput(_titleController, 'Project Title', Icons.title),
-          _buildStudentListInput(),
-          const SizedBox(height: 16),
-          _buildRowInputs(
-            _yearController,
-            'Year',
-            Icons.calendar_today,
-            _categoryController,
-            'Category',
-            Icons.category,
-          ),
-          _buildInput(_supervisorController, 'Supervisor', Icons.person),
-          _buildInput(
-            _technologiesController,
-            'Technologies',
-            Icons.computer,
-            enableScan: true,
-            fieldKey: 'technologies',
-          ),
-          _buildInput(
-            _keywordsController,
-            'Keywords',
-            Icons.tag,
-            enableScan: true,
-            fieldKey: 'keywords',
-          ),
-          _buildInput(
-            _abstractController,
-            'Abstract',
-            Icons.description,
-            maxLines: 4,
-            enableScan: true,
-            fieldKey: 'abstract',
-          ),
-          _buildInput(
-            _descriptionController,
-            'Description',
-            Icons.info_outline,
-            maxLines: 4,
-            enableScan: true,
-            fieldKey: 'description',
-          ),
-
-          const SizedBox(height: 32),
-          SizedBox(
-            height: 54,
-            child: ElevatedButton.icon(
-              onPressed: _saveLocal,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isEditing
-                    ? Colors.orange[800]
-                    : Colors.green[700],
-              ),
-              icon: Icon(
-                isEditing ? Icons.update : Icons.save,
-                color: Colors.white,
-              ),
-              label: Text(
-                isEditing ? 'Update Project' : 'Save Project',
-                style: const TextStyle(fontSize: 18, color: Colors.white),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // --- TAB 2: RAW OCR & IMAGE ---
-  Widget _buildRawOcrPage() {
-    if (_fullText.isEmpty && _pages.isEmpty) {
-      return Center(
-        child: Text(
-          "No OCR data yet.\nScan a document first.",
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.grey[500]),
-        ),
-      );
-    }
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (_pages.isNotEmpty)
-            SizedBox(
-              height: 200,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: _pages.length,
-                itemBuilder: (ctx, i) => Padding(
-                  padding: const EdgeInsets.only(right: 8.0),
-                  child: Image.file(File(_pages[i].path)),
-                ),
-              ),
-            ),
-          const SizedBox(height: 16),
-
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                "Extracted Text",
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-              ),
-              IconButton(
-                icon: const Icon(Icons.copy),
-                tooltip: "Copy All",
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: _fullText));
-                  _showSnack("Copied to clipboard", isSuccess: true);
-                },
-              ),
+  PreferredSizeWidget _buildAppBar(bool isEditing, int unsyncedCount) {
+    return AppBar(
+      elevation: 0,
+      backgroundColor: _AppColors.primary,
+      title: Text(isEditing ? 'Edit Project' : 'GradOCR',
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 22, letterSpacing: -0.5)),
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(48),
+        child: Container(
+          color: _AppColors.primary,
+          child: TabBar(
+            controller: _tabController,
+            labelColor: Colors.white,
+            unselectedLabelColor: Colors.white38,
+            indicatorColor: _AppColors.accent,
+            indicatorWeight: 3,
+            labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+            tabs: [
+              const Tab(icon: Icon(Icons.edit_document, size: 18), text: 'Form'),
+              Tab(icon: Stack(clipBehavior: Clip.none, children: [
+                const Icon(Icons.description_outlined, size: 18),
+                if (_scannedDocs.isNotEmpty)
+                  Positioned(right: -6, top: -4, child: Container(
+                    width: 14, height: 14,
+                    decoration: BoxDecoration(color: _AppColors.accent, borderRadius: BorderRadius.circular(7)),
+                    child: Center(child: Text('${_scannedDocs.length}', style: const TextStyle(fontSize: 9, color: Colors.white))),
+                  )),
+              ]), text: 'Documents'),
+              Tab(icon: Stack(clipBehavior: Clip.none, children: [
+                const Icon(Icons.folder_outlined, size: 18),
+                if (_projects.isNotEmpty)
+                  Positioned(right: -6, top: -4, child: Container(
+                    width: 14, height: 14,
+                    decoration: BoxDecoration(color: Colors.orange, borderRadius: BorderRadius.circular(7)),
+                    child: Center(child: Text('${_projects.length}', style: const TextStyle(fontSize: 9, color: Colors.white))),
+                  )),
+              ]), text: 'Projects'),
             ],
           ),
-
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                ActionChip(
-                  label: const Text("Append to Abstract"),
-                  onPressed: () {
-                    _abstractController.text =
-                        "${_abstractController.text}\n\n$_fullText";
-                    _tabController.animateTo(0);
-                    _showSnack("Appended to Abstract", isSuccess: true);
-                  },
-                ),
-                const SizedBox(width: 8),
-                ActionChip(
-                  label: const Text("Append to Description"),
-                  onPressed: () {
-                    _descriptionController.text =
-                        "${_descriptionController.text}\n\n$_fullText";
-                    _tabController.animateTo(0);
-                    _showSnack("Appended to Description", isSuccess: true);
-                  },
-                ),
-              ],
-            ),
+        ),
+      ),
+      actions: [
+        if (isEditing)
+          IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: _cancelEditing, tooltip: 'Cancel Edit')
+        else if (_currentIndex == 0)
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Colors.white54),
+            onPressed: () async {
+              if (await _confirm('Clear Form', 'Reset all fields and documents?')) {
+                _clearForm();
+                _showSnack('Form cleared', type: SnackType.success);
+              }
+            },
+            tooltip: 'Clear Form',
           ),
-          const SizedBox(height: 10),
-
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.grey[300]!),
-            ),
-            child: SelectableText(
-              _fullText,
-              style: const TextStyle(fontSize: 14),
-            ),
+        if (_currentIndex == 2)
+          IconButton(
+            icon: const Icon(Icons.delete_forever, color: Colors.white54),
+            onPressed: () async {
+              if (await _confirm('Delete All', 'Permanently delete all saved projects?')) {
+                for (final p in _projects) if (p.id != null) await DatabaseService.deleteProject(p.id!);
+                _loadProjects();
+                _showSnack('All deleted', type: SnackType.success);
+              }
+            },
+            tooltip: 'Delete All',
           ),
+      ],
+    );
+  }
+
+  // ─── TAB 1: FORM ───────────────────────────────────────────────────────────
+  Widget _buildFormTab(bool isEditing) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (isEditing) _buildEditBanner(),
+
+          if (!isEditing) ...[
+            _buildSectionLabel('DOCUMENTS', Icons.document_scanner),
+            _buildDocumentsPanel(),
+            const SizedBox(height: 12),
+            _buildExtractAllButton(),
+            if (_lastExtracted.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              _buildExtractionSummary(),
+            ],
+            const SizedBox(height: 24),
+          ],
+
+          // ── Project Details ──────────────────────────────────────────────
+          _buildSectionLabel('PROJECT DETAILS', Icons.info_outline),
+          _buildField(_titleCtrl, 'Project Title', Icons.title),
+          const SizedBox(height: 12),
+          _buildStudentSection(),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: _buildField(_yearCtrl, 'Year', Icons.calendar_today, keyboardType: TextInputType.number)),
+            const SizedBox(width: 12),
+            Expanded(child: _buildField(_categoryCtrl, 'Category', Icons.category)),
+          ]),
+          const SizedBox(height: 12),
+          _buildField(_supervisorCtrl, 'Supervisor', Icons.person_outline),
+          const SizedBox(height: 12),
+          _buildField(_techCtrl, 'Technologies', Icons.code, reExtractKey: 'technologies'),
+          const SizedBox(height: 12),
+          _buildField(_keywordsCtrl, 'Keywords', Icons.tag, reExtractKey: 'keywords'),
+          const SizedBox(height: 12),
+          _buildField(_abstractCtrl, 'Abstract', Icons.article_outlined, maxLines: 5, reExtractKey: 'abstract'),
+          const SizedBox(height: 12),
+          _buildField(_descCtrl, 'Description', Icons.notes, maxLines: 5, reExtractKey: 'description'),
+
+          // ── Problem, Solution & Objectives ───────────────────────────────
+          const SizedBox(height: 20),
+          _buildSectionLabel('PROBLEM, SOLUTION & OBJECTIVES', Icons.lightbulb_outline),
+          _buildField(_problemCtrl, 'Problem Statement', Icons.report_problem_outlined,
+              maxLines: 4, reExtractKey: 'problem'),
+          const SizedBox(height: 12),
+          _buildField(_solutionCtrl, 'Proposed Solution', Icons.check_circle_outline,
+              maxLines: 4, reExtractKey: 'solution'),
+          const SizedBox(height: 12),
+          _buildField(_objectivesCtrl, 'Project Objectives', Icons.flag_outlined,
+              maxLines: 4, reExtractKey: 'objectives'),
+
+          const SizedBox(height: 28),
+          _buildSaveButton(isEditing),
         ],
       ),
     );
   }
 
-  // --- TAB 3: PROJECTS LIST ---
-  Widget _buildListPage() {
-    if (_projects.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.folder_copy_outlined, size: 80, color: Colors.grey[300]),
-            const SizedBox(height: 16),
-            Text(
-              'No projects yet',
-              style: TextStyle(color: Colors.grey[500], fontSize: 16),
-            ),
-          ],
+  Widget _buildEditBanner() => Container(
+        margin: const EdgeInsets.only(bottom: 20),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: _AppColors.warningLight,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: _AppColors.warning.withOpacity(0.3)),
         ),
+        child: Row(children: [
+          Icon(Icons.edit, color: _AppColors.warning, size: 18),
+          const SizedBox(width: 10),
+          Expanded(child: Text('Editing: ${_titleCtrl.text}',
+              style: TextStyle(color: _AppColors.warning, fontWeight: FontWeight.w600))),
+          TextButton(
+            onPressed: _cancelEditing,
+            style: TextButton.styleFrom(foregroundColor: _AppColors.warning, padding: EdgeInsets.zero, minimumSize: const Size(0, 0)),
+            child: const Text('Cancel'),
+          ),
+        ]),
       );
-    }
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 80),
-      itemCount: _projects.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 12),
-      itemBuilder: (ctx, i) {
-        final p = _projects[i];
-        return Dismissible(
-          key: Key(p.id.toString()),
-          background: Container(
-            color: Colors.red,
-            alignment: Alignment.centerRight,
-            padding: const EdgeInsets.only(right: 20),
-            child: const Icon(Icons.delete, color: Colors.white),
+
+  // ─── DOCUMENTS PANEL ────────────────────────────────────────────────────────
+
+  Widget _buildDocumentsPanel() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      // ── Add buttons: Camera + Gallery only ──────────────────────────────
+      Row(children: [
+        Expanded(child: _buildAddDocButton(
+          Icons.camera_alt_rounded, 'Camera',
+          () => _pickAndAddDocument(ImageSource.camera),
+          _AppColors.accent,
+        )),
+        const SizedBox(width: 12),
+        Expanded(child: _buildAddDocButton(
+          Icons.photo_library_rounded, 'Gallery',
+          () => _pickAndAddDocument(ImageSource.gallery),
+          const Color(0xFF7C3AED),
+        )),
+      ]),
+
+      // ── Image grid ──────────────────────────────────────────────────────
+      if (_scannedDocs.isNotEmpty) ...[
+        const SizedBox(height: 14),
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 8,
+            mainAxisSpacing: 8,
+            childAspectRatio: 0.75,
           ),
-          direction: DismissDirection.endToStart,
-          confirmDismiss: (dir) =>
-              _showConfirmDialog("Delete Project?", "This cannot be undone."),
-          onDismissed: (dir) async {
-            await DatabaseService.deleteProject(p.id!);
-            _loadProjects();
+          itemCount: _scannedDocs.length,
+          itemBuilder: (ctx, i) {
+            final doc = _scannedDocs[i];
+            final img = doc['image'] as XFile?;
+            return _buildImageTile(i, doc, img);
           },
-          child: Card(
-            elevation: 3,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: () => _startEditing(p),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            p.title,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        if (p.isSynced)
-                          const Icon(Icons.check_circle, color: Colors.green)
-                        else
-                          const Icon(Icons.cloud_off, color: Colors.orange),
-                        PopupMenuButton(
-                          padding: EdgeInsets.zero,
-                          icon: const Icon(Icons.more_vert),
-                          onSelected: (val) {
-                            if (val == 'edit') _startEditing(p);
-                            if (val == 'sync') _uploadSingle(p);
-                            if (val == 'delete') {
-                              DatabaseService.deleteProject(p.id!);
-                              _loadProjects();
-                            }
-                          },
-                          itemBuilder: (ctx) => [
-                            const PopupMenuItem(
-                              value: 'edit',
-                              child: Text('Edit'),
-                            ),
-                            if (!p.isSynced)
-                              const PopupMenuItem(
-                                value: 'sync',
-                                child: Text('Sync'),
-                              ),
-                            const PopupMenuItem(
-                              value: 'delete',
-                              child: Text(
-                                'Delete',
-                                style: TextStyle(color: Colors.red),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    Text(
-                      p.supervisorName.isNotEmpty
-                          ? p.supervisorName
-                          : "No Supervisor",
-                      style: TextStyle(color: Colors.grey[600], fontSize: 13),
-                    ),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 4,
-                      children: p.studentNames
-                          .take(3)
-                          .map(
-                            (s) => Chip(
-                              label: Text(
-                                s,
-                                style: const TextStyle(fontSize: 10),
-                              ),
-                              materialTapTargetSize:
-                                  MaterialTapTargetSize.shrinkWrap,
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+        ),
+      ] else
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20),
+          child: Center(child: Column(children: [
+            Icon(Icons.add_photo_alternate_outlined, size: 40, color: _AppColors.border),
+            const SizedBox(height: 8),
+            Text('Add document pages', style: TextStyle(color: _AppColors.textSecondary, fontSize: 13)),
+          ])),
+        ),
+    ]);
+  }
+
+  Widget _buildAddDocButton(IconData icon, String label, VoidCallback onTap, Color color) {
+    return Material(
+      color: color.withOpacity(0.07),
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: color.withOpacity(0.25)),
           ),
-        );
-      },
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Container(
+              width: 34, height: 34,
+              decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)),
+              child: Icon(icon, color: Colors.white, size: 18),
+            ),
+            const SizedBox(width: 10),
+            Text(label, style: TextStyle(color: color, fontSize: 14, fontWeight: FontWeight.w700)),
+          ]),
+        ),
+      ),
     );
   }
 
-  // --- Widgets ---
-
-  Widget _buildStudentListInput() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildImageTile(int index, Map<String, dynamic> doc, XFile? img) {
+    return Stack(
+      fit: StackFit.expand,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _studentEntryController,
-                decoration: InputDecoration(
-                  labelText: 'Add Student Name',
-                  prefixIcon: const Icon(Icons.person_add),
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
+        // Image / placeholder
+        GestureDetector(
+          onTap: img != null ? () => _previewImage(img, index) : null,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: img != null
+                ? Image.file(File(img.path), fit: BoxFit.cover)
+                : Container(
+                    decoration: BoxDecoration(
+                      color: _AppColors.accentLight,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(Icons.description_outlined, color: _AppColors.accent, size: 32),
                   ),
+          ),
+        ),
+        // Page label bottom
+        Positioned(
+          bottom: 0, left: 0, right: 0,
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 5),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.black.withOpacity(0.6), Colors.transparent],
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
                 ),
-                onSubmitted: (_) => _addStudent(),
+              ),
+              child: Text(
+                doc['label'] as String,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600),
               ),
             ),
-            const SizedBox(width: 8),
-            FloatingActionButton.small(
-              onPressed: _addStudent,
-              backgroundColor: Colors.indigo,
-              heroTag: "add_student",
-              child: const Icon(Icons.add, color: Colors.white),
-            ),
-            const SizedBox(width: 8),
-            FloatingActionButton.small(
-              onPressed: _scanStudentNames,
-              backgroundColor: Colors.green[700],
-              heroTag: "scan_students",
-              tooltip: "Scan Names",
-              child: const Icon(Icons.camera_alt, color: Colors.white),
-            ),
-          ],
+          ),
         ),
-        if (_studentNamesList.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Wrap(
-              spacing: 8,
-              children: _studentNamesList
-                  .map(
-                    (n) => Chip(
-                      label: Text(n),
-                      onDeleted: () => setState(() {
-                        _studentNamesList.remove(n);
-                        _saveDraft();
-                      }),
-                    ),
-                  )
-                  .toList(),
+        // Delete button top-right
+        Positioned(
+          top: 4, right: 4,
+          child: GestureDetector(
+            onTap: () => _removeDoc(index),
+            child: Container(
+              width: 22, height: 22,
+              decoration: BoxDecoration(
+                color: _AppColors.danger,
+                shape: BoxShape.circle,
+                boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
+              ),
+              child: const Icon(Icons.close, color: Colors.white, size: 13),
+            ),
+          ),
+        ),
+        // Tap to preview overlay icon bottom-right (only for images)
+        if (img != null)
+          Positioned(
+            bottom: 24, right: 4,
+            child: Container(
+              width: 22, height: 22,
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.5),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.zoom_in, color: Colors.white, size: 13),
             ),
           ),
       ],
     );
   }
 
-  Widget _buildSectionHeader(String title) => Padding(
-    padding: const EdgeInsets.only(bottom: 12, left: 4),
-    child: Text(
-      title,
-      style: TextStyle(
-        fontSize: 14,
-        fontWeight: FontWeight.w900,
-        color: Colors.grey[600],
-      ),
-    ),
-  );
-
-  Widget _buildBigButton(IconData icon, String label, VoidCallback onTap) =>
-      InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey[300]!),
-            borderRadius: BorderRadius.circular(12),
+  void _previewImage(XFile img, int index) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(12),
+        child: Stack(children: [
+          // Full image
+          ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: InteractiveViewer(
+              minScale: 0.8,
+              maxScale: 5.0,
+              child: Image.file(File(img.path), fit: BoxFit.contain),
+            ),
           ),
-          child: Column(
-            children: [
-              Icon(icon, size: 32, color: Colors.indigo[400]),
-              const SizedBox(height: 8),
-              Text(
-                label,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: Colors.grey[800],
+          // Close button
+          Positioned(
+            top: 8, right: 8,
+            child: GestureDetector(
+              onTap: () => Navigator.pop(ctx),
+              child: Container(
+                width: 32, height: 32,
+                decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                child: const Icon(Icons.close, color: Colors.white, size: 18),
+              ),
+            ),
+          ),
+          // Page label + delete
+          Positioned(
+            bottom: 8, left: 8, right: 8,
+            child: Row(children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
+                child: Text('Page ${index + 1}', style: const TextStyle(color: Colors.white, fontSize: 12)),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: () { Navigator.pop(ctx); _removeDoc(index); },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(color: _AppColors.danger.withOpacity(0.85), borderRadius: BorderRadius.circular(20)),
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.delete_outline, color: Colors.white, size: 14),
+                    SizedBox(width: 4),
+                    Text('Remove', style: TextStyle(color: Colors.white, fontSize: 12)),
+                  ]),
                 ),
               ),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildExtractAllButton() {
+    final imgCount   = _scannedDocs.where((d) => d['image'] != null).length;
+    final hasContent = imgCount > 0;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      decoration: BoxDecoration(
+        gradient: hasContent
+            ? const LinearGradient(
+                colors: [Color(0xFF4F46E5), Color(0xFF7C3AED)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              )
+            : null,
+        color: hasContent ? null : _AppColors.border,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: hasContent
+            ? [BoxShadow(color: const Color(0xFF4F46E5).withOpacity(0.4), blurRadius: 20, offset: const Offset(0, 8))]
+            : null,
+      ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          onTap: (!hasContent || _isProcessing) ? null : _aiExtractAll,
+          borderRadius: BorderRadius.circular(18),
+          splashColor: Colors.white12,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+            child: _isProcessing
+                ? Column(children: [
+                    Row(children: [
+                      const SizedBox(width: 18, height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white)),
+                      const SizedBox(width: 14),
+                      Expanded(child: Text(_processingStep,
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15),
+                          overflow: TextOverflow.ellipsis)),
+                      Text('${(_processingProgress * 100).round()}%',
+                          style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w600)),
+                    ]),
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: LinearProgressIndicator(
+                        value: _processingProgress,
+                        backgroundColor: Colors.white24,
+                        valueColor: const AlwaysStoppedAnimation(Colors.white),
+                        minHeight: 4,
+                      ),
+                    ),
+                  ])
+                : Row(children: [
+                    Container(
+                      width: 42, height: 42,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(hasContent ? 0.2 : 0.0),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(Icons.auto_awesome_rounded,
+                          color: hasContent ? Colors.white : _AppColors.textSecondary, size: 22),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('Extract All Fields',
+                          style: TextStyle(
+                            color: hasContent ? Colors.white : _AppColors.textSecondary,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 16,
+                            letterSpacing: -0.3,
+                          )),
+                      const SizedBox(height: 2),
+                      Text(
+                        hasContent
+                            ? '$imgCount page${imgCount != 1 ? "s" : ""} ready · powered by Gemini'
+                            : 'Add pages above first',
+                        style: TextStyle(
+                          color: hasContent ? Colors.white.withOpacity(0.75) : _AppColors.textSecondary.withOpacity(0.6),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ])),
+                    if (hasContent)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(30),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: const Text('GO', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1)),
+                      ),
+                  ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildExtractionSummary() {
+    if (_lastExtracted.isEmpty) return const SizedBox.shrink();
+
+    String getValue(String key) {
+      final v = _lastExtracted[key];
+      if (v == null) return '';
+      if (v is String) return v;
+      if (v is Map) return v['value']?.toString() ?? '';
+      return '';
+    }
+
+    final fields = [
+      ('title',        'Title',      Icons.title),
+      ('students',     'Students',   Icons.people_outline),
+      ('supervisor',   'Supervisor', Icons.person_outline),
+      ('year',         'Year',       Icons.calendar_today),
+      ('abstract',     'Abstract',   Icons.article_outlined),
+      ('description',  'Description',Icons.notes),
+      ('problem',      'Problem',    Icons.report_problem_outlined),
+      ('solution',     'Solution',   Icons.check_circle_outline),
+      ('objectives',   'Objectives', Icons.flag_outlined),
+      ('technologies', 'Technologies',Icons.code),
+      ('keywords',     'Keywords',   Icons.tag),
+      ('category',     'Category',   Icons.category_outlined),
+    ];
+
+    final found    = fields.where((f) => getValue(f.$1).isNotEmpty).toList();
+    final notFound = fields.where((f) => getValue(f.$1).isEmpty).toList();
+
+    return Container(
+      decoration: BoxDecoration(
+        color: _AppColors.successLight,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _AppColors.success.withOpacity(0.3)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Header
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+          child: Row(children: [
+            Container(
+              width: 28, height: 28,
+              decoration: BoxDecoration(color: _AppColors.success, shape: BoxShape.circle),
+              child: const Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 15),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(
+              'Gemini extracted ${found.length} of ${fields.length} fields',
+              style: TextStyle(color: _AppColors.success, fontWeight: FontWeight.w700, fontSize: 13),
+            )),
+            Text('${found.length}/${fields.length}',
+                style: TextStyle(color: _AppColors.success, fontWeight: FontWeight.w800, fontSize: 13)),
+          ]),
+        ),
+        const Divider(height: 1, indent: 14, endIndent: 14),
+        // Fields grid
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              ...found.map((f) => _buildFieldChip(
+                f.$2,
+                getValue(f.$1),
+                f.$3,
+                found: true,
+              )),
+              ...notFound.map((f) => _buildFieldChip(
+                f.$2,
+                '',
+                f.$3,
+                found: false,
+              )),
             ],
+          ),
+        ),
+        // Preview of key extracted values
+        if (getValue('title').isNotEmpty || getValue('abstract').isNotEmpty) ...[
+          const Divider(height: 1, indent: 14, endIndent: 14),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              if (getValue('title').isNotEmpty) ...[
+                _buildPreviewRow('Title', getValue('title'), Icons.title),
+                const SizedBox(height: 6),
+              ],
+              if (getValue('supervisor').isNotEmpty) ...[
+                _buildPreviewRow('Supervisor', getValue('supervisor'), Icons.person_outline),
+                const SizedBox(height: 6),
+              ],
+              if (getValue('abstract').isNotEmpty)
+                _buildPreviewRow('Abstract', getValue('abstract'), Icons.article_outlined, maxChars: 120),
+            ]),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  Widget _buildFieldChip(String label, String value, IconData icon, {required bool found}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: found ? _AppColors.success.withOpacity(0.12) : _AppColors.border.withOpacity(0.5),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: found ? _AppColors.success.withOpacity(0.3) : _AppColors.border,
+        ),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(
+          found ? Icons.check_circle : Icons.radio_button_unchecked,
+          size: 11,
+          color: found ? _AppColors.success : _AppColors.textSecondary.withOpacity(0.5),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: found ? _AppColors.success : _AppColors.textSecondary.withOpacity(0.5),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildPreviewRow(String label, String value, IconData icon, {int maxChars = 60}) {
+    final display = value.length > maxChars ? '${value.substring(0, maxChars)}...' : value;
+    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Icon(icon, size: 13, color: _AppColors.success.withOpacity(0.7)),
+      const SizedBox(width: 6),
+      Expanded(child: RichText(text: TextSpan(children: [
+        TextSpan(text: '$label: ', style: TextStyle(
+          fontSize: 12, fontWeight: FontWeight.w700,
+          color: _AppColors.success.withOpacity(0.8),
+        )),
+        TextSpan(text: display, style: TextStyle(
+          fontSize: 12, color: _AppColors.textPrimary.withOpacity(0.75),
+        )),
+      ]))),
+    ]);
+  }
+
+  Widget _buildStudentSection() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Expanded(child: TextField(
+          controller: _studentEntryCtrl,
+          decoration: InputDecoration(
+            labelText: 'Add Student Name',
+            labelStyle: TextStyle(color: _AppColors.textSecondary),
+            prefixIcon: Icon(Icons.person_add_outlined, size: 20, color: _AppColors.textSecondary),
+            filled: true, fillColor: _AppColors.surface,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _AppColors.border)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _AppColors.border)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _AppColors.accent, width: 1.5)),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          ),
+          onSubmitted: (_) => _addStudent(),
+        )),
+        const SizedBox(width: 8),
+        _buildIconBtn(icon: Icons.add, color: _AppColors.accent, onTap: _addStudent),
+      ]),
+      if (_studentNames.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Wrap(spacing: 8, runSpacing: 6, children: _studentNames.map((name) => Chip(
+            label: Text(name, style: const TextStyle(fontSize: 12)),
+            deleteIcon: const Icon(Icons.close, size: 14),
+            onDeleted: () => setState(() { _studentNames.remove(name); _saveDraft(); }),
+            backgroundColor: _AppColors.accentLight,
+            side: BorderSide(color: _AppColors.accent.withOpacity(0.2)),
+            labelStyle: TextStyle(color: _AppColors.accent),
+            deleteIconColor: _AppColors.accent,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          )).toList()),
+        ),
+    ]);
+  }
+
+  void _addStudent() {
+    final name = _studentEntryCtrl.text.trim();
+    if (name.isNotEmpty && !_studentNames.contains(name)) {
+      setState(() { _studentNames.add(name); _studentEntryCtrl.clear(); });
+      _saveDraft();
+    }
+  }
+
+  Widget _buildIconBtn({required IconData icon, required Color color, required VoidCallback onTap}) {
+    return Material(
+      color: color, borderRadius: BorderRadius.circular(12),
+      child: InkWell(onTap: onTap, borderRadius: BorderRadius.circular(12),
+        child: Container(width: 46, height: 46, alignment: Alignment.center, child: Icon(icon, color: Colors.white, size: 22)),
+      ),
+    );
+  }
+
+  Widget _buildField(TextEditingController ctrl, String label, IconData icon, {
+    int maxLines = 1, TextInputType keyboardType = TextInputType.text, String? reExtractKey,
+  }) {
+    return TextField(
+      controller: ctrl, maxLines: maxLines, keyboardType: keyboardType,
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(color: _AppColors.textSecondary),
+        prefixIcon: Icon(icon, size: 20, color: _AppColors.textSecondary),
+        suffixIcon: reExtractKey != null
+            ? Row(mainAxisSize: MainAxisSize.min, children: [
+                // ✨ re-extract from already-scanned pages
+                IconButton(
+                  icon: Icon(Icons.auto_awesome, size: 18, color: _AppColors.accent),
+                  tooltip: 'Re-extract from scanned pages',
+                  onPressed: () => _reExtractField(ctrl, reExtractKey),
+                ),
+                // 📷 scan a new photo just for this field
+                IconButton(
+                  icon: Icon(Icons.add_a_photo_outlined, size: 18, color: const Color(0xFF7C3AED)),
+                  tooltip: 'Scan a photo for this field',
+                  onPressed: () => _showFieldScanPicker(ctrl, reExtractKey),
+                ),
+              ])
+            : null,
+        filled: true, fillColor: _AppColors.surface,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _AppColors.border)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _AppColors.border)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _AppColors.accent, width: 1.5)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      ),
+    );
+  }
+
+  void _showFieldScanPicker(TextEditingController ctrl, String fieldName) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(width: 36, height: 4, decoration: BoxDecoration(color: _AppColors.border, borderRadius: BorderRadius.circular(2))),
+          const SizedBox(height: 16),
+          Text('Scan for $fieldName', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+          const SizedBox(height: 20),
+          Row(children: [
+            Expanded(child: _buildScanFieldButton(
+              icon: Icons.camera_alt_rounded,
+              label: 'Camera',
+              color: _AppColors.accent,
+              onTap: () { Navigator.pop(ctx); _scanFieldFromImage(ctrl, fieldName, ImageSource.camera); },
+            )),
+            const SizedBox(width: 12),
+            Expanded(child: _buildScanFieldButton(
+              icon: Icons.photo_library_rounded,
+              label: 'Gallery',
+              color: const Color(0xFF7C3AED),
+              onTap: () { Navigator.pop(ctx); _scanFieldFromImage(ctrl, fieldName, ImageSource.gallery); },
+            )),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildScanFieldButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: color.withOpacity(0.06),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withOpacity(0.2)),
+          ),
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _scanFieldFromImage(
+    TextEditingController ctrl,
+    String fieldName,
+    ImageSource source,
+  ) async {
+    try {
+      final XFile? picked = source == ImageSource.gallery
+          ? (await _picker.pickMultiImage()).firstOrNull
+          : await _picker.pickImage(source: ImageSource.camera);
+
+      if (picked == null) return;
+
+      _showSnack('Analyzing image...', type: SnackType.info);
+
+      // Use smart override — Gemini reads whatever is on the page,
+      // understands the content regardless of how it is labeled,
+      // cleans it, and returns it ready to insert.
+      final value = await OcrService.smartScanForField(
+        fieldName: fieldName,
+        imagePath: picked.path,
+      );
+
+      if (value.isNotEmpty) {
+        setState(() => ctrl.text = value);
+        _saveDraft();
+        _showSnack('$fieldName filled!', type: SnackType.success);
+      } else {
+        _showSnack('Nothing useful found in that image', type: SnackType.warning);
+      }
+    } catch (e) {
+      _showSnack('Error: $e', type: SnackType.error);
+    }
+  }
+
+  Widget _buildSectionLabel(String text, IconData icon) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Row(children: [
+          Icon(icon, size: 14, color: _AppColors.textSecondary),
+          const SizedBox(width: 6),
+          Text(text, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: _AppColors.textSecondary, letterSpacing: 1.2)),
+        ]),
+      );
+
+  Widget _buildSaveButton(bool isEditing) => SizedBox(
+        height: 54,
+        child: ElevatedButton.icon(
+          onPressed: _saveLocal,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: isEditing ? _AppColors.warning : _AppColors.success,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            elevation: 0,
+          ),
+          icon: Icon(isEditing ? Icons.update : Icons.save_outlined, size: 20),
+          label: Text(isEditing ? 'Update Project' : 'Save Project',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        ),
+      );
+
+  // ─── TAB 2: DOCUMENTS / RAW TEXT ───────────────────────────────────────────
+  Widget _buildRawTab() {
+    if (_scannedDocs.isEmpty) {
+      return _buildEmptyState(
+        Icons.document_scanner_outlined,
+        'No pages yet',
+        'Add images from the Form tab',
+      );
+    }
+
+    // Fields to show in the extracted summary
+    final extractedFields = [
+      ('title',        'Title',       Icons.title),
+      ('students',     'Students',    Icons.people_outline),
+      ('supervisor',   'Supervisor',  Icons.person_outline),
+      ('year',         'Year',        Icons.calendar_today),
+      ('abstract',     'Abstract',    Icons.article_outlined),
+      ('description',  'Description', Icons.notes),
+      ('problem',      'Problem',     Icons.report_problem_outlined),
+      ('solution',     'Solution',    Icons.check_circle_outline),
+      ('objectives',   'Objectives',  Icons.flag_outlined),
+      ('technologies', 'Technologies',Icons.code),
+      ('keywords',     'Keywords',    Icons.tag),
+      ('category',     'Category',    Icons.category_outlined),
+    ];
+
+    String getVal(String key) {
+      final v = _lastExtracted[key];
+      if (v == null) return '';
+      if (v is String) return v;
+      if (v is Map) return v['value']?.toString() ?? '';
+      return '';
+    }
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+
+        // ── Page images row ──────────────────────────────────────────────
+        Text('PAGES (${_scannedDocs.length})',
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800,
+                color: _AppColors.textSecondary, letterSpacing: 1.2)),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 160,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: _scannedDocs.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (ctx, i) {
+              final doc = _scannedDocs[i];
+              final img = doc['image'] as XFile?;
+              return GestureDetector(
+                onTap: img != null ? () => _previewImage(img, i) : null,
+                child: Stack(children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: img != null
+                        ? Image.file(File(img.path),
+                            width: 110, height: 160, fit: BoxFit.cover)
+                        : Container(
+                            width: 110, height: 160,
+                            decoration: BoxDecoration(
+                              color: _AppColors.accentLight,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(Icons.description_outlined,
+                                color: _AppColors.accent, size: 32),
+                          ),
+                  ),
+                  // Page label
+                  Positioned(
+                    bottom: 0, left: 0, right: 0,
+                    child: ClipRRect(
+                      borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 5),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [Colors.black.withOpacity(0.65), Colors.transparent],
+                            begin: Alignment.bottomCenter,
+                            end: Alignment.topCenter,
+                          ),
+                        ),
+                        child: Text('Page \${i + 1}',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
+                      ),
+                    ),
+                  ),
+                  // Zoom icon
+                  if (img != null)
+                    Positioned(
+                      top: 6, right: 6,
+                      child: Container(
+                        width: 22, height: 22,
+                        decoration: BoxDecoration(color: Colors.black45, shape: BoxShape.circle),
+                        child: const Icon(Icons.zoom_in, color: Colors.white, size: 13),
+                      ),
+                    ),
+                ]),
+              );
+            },
+          ),
+        ),
+
+        const SizedBox(height: 24),
+
+        // ── Extracted data ───────────────────────────────────────────────
+        Row(children: [
+          Text('EXTRACTED DATA',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800,
+                  color: _AppColors.textSecondary, letterSpacing: 1.2)),
+          const Spacer(),
+          if (_lastExtracted.isEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: _AppColors.warningLight,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text('Not extracted yet',
+                  style: TextStyle(fontSize: 11, color: _AppColors.warning, fontWeight: FontWeight.w600)),
+            )
+          else
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: _AppColors.successLight,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '\${extractedFields.where((f) => getVal(f.\$1).isNotEmpty).length}/\${extractedFields.length} fields',
+                style: TextStyle(fontSize: 11, color: _AppColors.success, fontWeight: FontWeight.w600),
+              ),
+            ),
+        ]),
+        const SizedBox(height: 10),
+
+        if (_lastExtracted.isEmpty)
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: _AppColors.surface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _AppColors.border),
+            ),
+            child: Column(children: [
+              Icon(Icons.auto_awesome_outlined, size: 36, color: _AppColors.border),
+              const SizedBox(height: 10),
+              Text('Tap "Extract All Fields" in the Form tab',
+                  style: TextStyle(color: _AppColors.textSecondary, fontSize: 13),
+                  textAlign: TextAlign.center),
+            ]),
+          )
+        else
+          Column(
+            children: extractedFields.map((f) {
+              final value = getVal(f.$1);
+              if (value.isEmpty) return const SizedBox.shrink();
+              return Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                decoration: BoxDecoration(
+                  color: _AppColors.surface,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: _AppColors.border),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  // Field header
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+                    child: Row(children: [
+                      Container(
+                        width: 28, height: 28,
+                        decoration: BoxDecoration(
+                          color: _AppColors.accentLight,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(f.$3, size: 15, color: _AppColors.accent),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(f.$2,
+                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                      const Spacer(),
+                      GestureDetector(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: value));
+                          _showSnack('Copied ${f.$2}!', type: SnackType.success);
+                        },
+                        child: Icon(Icons.copy_outlined, size: 16, color: _AppColors.textSecondary),
+                      ),
+                    ]),
+                  ),
+                  const Divider(height: 1),
+                  // Field value
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+                    child: SelectableText(
+                      value,
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.6,
+                        color: _AppColors.textPrimary,
+                      ),
+                    ),
+                  ),
+                ]),
+              );
+            }).toList(),
+          ),
+
+        const SizedBox(height: 80),
+      ]),
+    );
+  }
+
+  // ─── TAB 3: PROJECTS ───────────────────────────────────────────────────────
+  Widget _buildProjectsTab() {
+    if (_projects.isEmpty) {
+      return _buildEmptyState(Icons.folder_copy_outlined, 'No saved projects', 'Fill in the form and tap Save to add projects');
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+      itemCount: _projects.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 12),
+      itemBuilder: (ctx, i) {
+        final p = _projects[i];
+        return Dismissible(
+          key: Key('proj_${p.id}'),
+          direction: DismissDirection.endToStart,
+          background: Container(
+            decoration: BoxDecoration(color: _AppColors.danger, borderRadius: BorderRadius.circular(16)),
+            alignment: Alignment.centerRight, padding: const EdgeInsets.only(right: 20),
+            child: const Icon(Icons.delete, color: Colors.white),
+          ),
+          confirmDismiss: (_) => _confirm('Delete Project?', 'Cannot be undone.'),
+          onDismissed: (_) async { await DatabaseService.deleteProject(p.id!); _loadProjects(); },
+          child: _buildProjectCard(p),
+        );
+      },
+    );
+  }
+
+  Widget _buildProjectCard(ProjectInfo p) => Container(
+        decoration: BoxDecoration(
+          color: _AppColors.surface,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: _AppColors.border),
+          boxShadow: [BoxShadow(color: _AppColors.cardShadow, blurRadius: 8, offset: const Offset(0, 2))],
+        ),
+        child: InkWell(
+          onTap: () => _startEditing(p),
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: p.isSynced ? _AppColors.successLight : _AppColors.warningLight,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(p.isSynced ? Icons.check_circle : Icons.cloud_off, size: 12, color: p.isSynced ? _AppColors.success : _AppColors.warning),
+                    const SizedBox(width: 4),
+                    Text(p.isSynced ? 'Synced' : 'Local',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: p.isSynced ? _AppColors.success : _AppColors.warning)),
+                  ]),
+                ),
+                if (p.year.isNotEmpty) ...[const SizedBox(width: 8), Text(p.year, style: TextStyle(color: _AppColors.textSecondary, fontSize: 12))],
+                const Spacer(),
+                PopupMenuButton<String>(
+                  padding: EdgeInsets.zero,
+                  icon: Icon(Icons.more_vert, color: _AppColors.textSecondary, size: 20),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  onSelected: (val) {
+                    if (val == 'edit') _startEditing(p);
+                    if (val == 'sync') _uploadSingle(p);
+                    if (val == 'delete') { DatabaseService.deleteProject(p.id!); _loadProjects(); }
+                  },
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(value: 'edit', child: Text('Edit')),
+                    if (!p.isSynced) const PopupMenuItem(value: 'sync', child: Text('Sync to Sheets')),
+                    PopupMenuItem(value: 'delete', child: Text('Delete', style: TextStyle(color: _AppColors.danger))),
+                  ],
+                ),
+              ]),
+              const SizedBox(height: 10),
+              Text(p.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, height: 1.3)),
+              if (p.supervisorName.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Row(children: [Icon(Icons.person_outline, size: 14, color: _AppColors.textSecondary), const SizedBox(width: 4), Text(p.supervisorName, style: TextStyle(color: _AppColors.textSecondary, fontSize: 13))]),
+              ],
+              if (p.category.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Row(children: [Icon(Icons.category_outlined, size: 14, color: _AppColors.textSecondary), const SizedBox(width: 4), Text(p.category, style: TextStyle(color: _AppColors.textSecondary, fontSize: 13))]),
+              ],
+              // Problem snippet in card
+              if (p.problem.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Icon(Icons.report_problem_outlined, size: 13, color: _AppColors.warning),
+                  const SizedBox(width: 4),
+                  Expanded(child: Text(
+                    p.problem.length > 80 ? '${p.problem.substring(0, 80)}...' : p.problem,
+                    style: TextStyle(color: _AppColors.textSecondary, fontSize: 12),
+                  )),
+                ]),
+              ],
+              if (p.studentNames.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Wrap(spacing: 6, runSpacing: 4, children: p.studentNames.take(3).map((s) => Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(color: _AppColors.bg, borderRadius: BorderRadius.circular(6), border: Border.all(color: _AppColors.border)),
+                  child: Text(s, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500)),
+                )).toList()),
+              ],
+            ]),
           ),
         ),
       );
 
-  Widget _buildInput(
-    TextEditingController c,
-    String label,
-    IconData icon, {
-    int maxLines = 1,
-    bool enableScan = false,
-    String fieldKey = '',
-  }) => Padding(
-    padding: const EdgeInsets.only(bottom: 16),
-    child: TextField(
-      controller: c,
-      maxLines: maxLines,
-      decoration: InputDecoration(
-        labelText: label,
-        prefixIcon: Icon(icon, size: 22, color: Colors.grey[500]),
-        // Individual field buttons still available as override
-        suffixIcon: enableScan
-            ? IconButton(
-                icon: const Icon(Icons.auto_awesome, color: Colors.indigo),
-                tooltip: "Re-fill this field from scanned text",
-                onPressed: () => _fillFieldFromOcr(c, fieldKey),
-              )
-            : null,
-        filled: true,
-        fillColor: Colors.white,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
-        ),
-      ),
-    ),
-  );
+  Widget _buildSyncFab(int unsyncedCount) {
+    return FloatingActionButton.extended(
+      onPressed: unsyncedCount > 0 ? _syncAll : null,
+      backgroundColor: unsyncedCount > 0 ? _AppColors.accent : _AppColors.success,
+      foregroundColor: Colors.white,
+      elevation: 4,
+      icon: Icon(unsyncedCount > 0 ? Icons.cloud_upload_outlined : Icons.check_circle),
+      label: Text(unsyncedCount > 0 ? 'Sync All ($unsyncedCount)' : 'All Synced',
+          style: const TextStyle(fontWeight: FontWeight.w700)),
+    );
+  }
 
-  Widget _buildRowInputs(
-    TextEditingController c1,
-    String l1,
-    IconData i1,
-    TextEditingController c2,
-    String l2,
-    IconData i2,
-  ) => Row(
-    children: [
-      Expanded(child: _buildInput(c1, l1, i1)),
-      const SizedBox(width: 12),
-      Expanded(child: _buildInput(c2, l2, i2)),
-    ],
-  );
+  Widget _buildEmptyState(IconData icon, String title, String subtitle) {
+    return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Container(
+        width: 80, height: 80,
+        decoration: BoxDecoration(color: _AppColors.accentLight, borderRadius: BorderRadius.circular(20)),
+        child: Icon(icon, size: 36, color: _AppColors.accent),
+      ),
+      const SizedBox(height: 16),
+      Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: _AppColors.textPrimary)),
+      const SizedBox(height: 6),
+      Text(subtitle, style: TextStyle(color: _AppColors.textSecondary, fontSize: 13), textAlign: TextAlign.center),
+    ]));
+  }
 }
+
+enum SnackType { success, error, warning, info }
