@@ -11,36 +11,33 @@ import 'package:http/http.dart' as http;
 /// - Regex salvage as last resort
 /// - Per-field confidence scoring
 /// - Smart semantic field scanning
+/// - Fill-missing-fields from context
+/// - Per-field AI generation from context
+/// - Summary generation
 class OcrService {
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ✏️  PUT YOUR API KEYS HERE
-  // Get free keys from: https://aistudio.google.com → "Get API Key"
-  // You can add 1 to 6 keys. Each gives 20 free requests/day.
-  // 6 keys = 120 requests/day = ~60-120 projects/day
   // ═══════════════════════════════════════════════════════════════════════════
   static const List<String> _apiKeys = [
-    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',   // ← Replace with your first key
-    'AIzaSyDUnS-PQ0tN5S9aOGXsk4KPY9CqRdIUrSE',   // ← Replace with your second key
-    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',   // ← Replace with your third key
-    'AIzaSyDTVoQJEt9K4NCjyizW8E1r__RvDPbKTCg',   // ← Replace with your fourth key
-    'AIzaSyDZm5_Ex_erY6lPhsAHFShlLjdClOovm2U',   // ← Replace with your fifth key
-    'AIzaSyDwbfwEA3eb-SOnQ7kNXe7o6lySNP4LbTo',   // ← Replace with your sixth key
+    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
+    'AIzaSyDUnS-PQ0tN5S9aOGXsk4KPY9CqRdIUrSE',
+    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
+    'AIzaSyDTVoQJEt9K4NCjyizW8E1r__RvDPbKTCg',
+    'AIzaSyDZm5_Ex_erY6lPhsAHFShlLjdClOovm2U',
+    'AIzaSyDwbfwEA3eb-SOnQ7kNXe7o6lySNP4LbTo',
   ];
-  // ═══════════════════════════════════════════════════════════════════════════
 
   static const String _baseUrl =
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=';
 
-  static const int _maxRetries  = 1; // Reduced from 3 to save quota
+  static const int _maxRetries  = 1;
   static const int _timeoutSecs = 60;
   static const int _maxTokens   = 8192;
 
-  // Tracks which key to use next
   static int _currentKeyIndex = 0;
 
   static String get _currentKey {
-    // Skip any placeholder keys
     for (int i = 0; i < _apiKeys.length; i++) {
       final idx = (_currentKeyIndex + i) % _apiKeys.length;
       if (!_apiKeys[idx].startsWith('YOUR_API_KEY')) {
@@ -48,7 +45,6 @@ class OcrService {
         return _apiKeys[idx];
       }
     }
-    // fallback if all are placeholders
     return _apiKeys[_currentKeyIndex];
   }
 
@@ -62,8 +58,8 @@ class OcrService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /// Main extraction — sends all images to Gemini Vision in one call.
-  /// Retries up to _maxRetries times with exponential backoff.
-  /// Uses enhanced prompt on retry. Rotates API keys on rate limit.
+  /// Also generates a project summary in the same request.
+  /// Returns extracted fields + a 'summary' key.
   static Future<Map<String, dynamic>> extractFromAll({
     List<String> imagePaths = const [],
     List<String> rawTexts   = const [],
@@ -101,7 +97,7 @@ class OcrService {
       return _emptyResult();
     }
 
-    String currentPrompt = _mainPrompt;
+    String currentPrompt = _mainPromptWithSummary;
     Map<String, dynamic> bestResult = _emptyResult();
     int bestFilledCount = 0;
 
@@ -111,7 +107,7 @@ class OcrService {
         print('[OCR] Retry $attempt/$_maxRetries — waiting ${waitSecs}s');
         onProgress?.call('Retrying extraction (attempt $attempt)...', 0.5 + attempt * 0.05);
         await Future.delayed(Duration(seconds: waitSecs));
-        currentPrompt = _enhancedPrompt;
+        currentPrompt = _enhancedPromptWithSummary;
       } else {
         onProgress?.call('Analyzing with Gemini Vision...', 0.5);
       }
@@ -132,7 +128,6 @@ class OcrService {
         bestFilledCount = filledCount;
       }
 
-      // 4+ fields is acceptable — stop retrying
       if (filledCount >= 4) break;
     }
 
@@ -141,8 +136,225 @@ class OcrService {
     return bestResult;
   }
 
+  /// Fill missing fields + regenerate summary using existing field context + images.
+  /// Only fills fields where the current value is empty or below threshold.
+  /// Returns a full result map including a new 'summary'.
+  static Future<Map<String, dynamic>> fillMissingFields({
+    required Map<String, String> existingFields,
+    List<String> imagePaths = const [],
+    void Function(String step, double progress)? onProgress,
+  }) async {
+    onProgress?.call('Building context from existing fields...', 0.1);
+
+    final parts = <Map<String, dynamic>>[];
+
+    // Add images if available
+    for (int i = 0; i < imagePaths.length; i++) {
+      onProgress?.call('Loading page ${i + 1}...', 0.1 + (i / imagePaths.length) * 0.25);
+      try {
+        final bytes = await File(imagePaths[i]).readAsBytes();
+        parts.add({
+          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+        });
+      } catch (e) {
+        print('[OCR] Could not read $e');
+      }
+    }
+
+    // Build a context summary of existing fields
+    final contextLines = <String>[];
+    existingFields.forEach((key, value) {
+      if (value.isNotEmpty) {
+        contextLines.add('$key: $value');
+      }
+    });
+
+    // Identify missing fields
+    final missingKeys = _allKeys
+        .where((k) => (existingFields[k] ?? '').isEmpty)
+        .toList();
+
+    if (missingKeys.isEmpty) {
+      // All fields present — just generate summary
+      onProgress?.call('Generating summary...', 0.5);
+      final summary = await generateSummary(existingFields: existingFields);
+      onProgress?.call('Done', 1.0);
+      return {'summary': summary, 'filledFields': {}};
+    }
+
+    onProgress?.call('Asking AI to fill ${missingKeys.length} missing fields...', 0.4);
+
+    final contextText = contextLines.join('\n');
+    final missingList = missingKeys.join(', ');
+
+    final prompt = '''
+You are analyzing a graduation project. Here is the known information about this project:
+
+$contextText
+
+${parts.isEmpty ? '' : 'Additional document pages are also provided above.'}
+
+TASK: Based on ALL available context above, intelligently generate content for ONLY these missing fields: $missingList
+
+For each missing field, infer or generate appropriate content:
+- If the document pages show the content, COPY it verbatim
+- If it can be inferred from other fields, generate it logically
+- Use academic/professional tone appropriate for a graduation project
+- For "category": pick ONE of: Medical, Education, Finance, E-Commerce, Social Media, Entertainment, Transportation, Smart Agriculture, IoT/Smart Home, Manufacturing, Other
+- For "year": use current year if not found: ${DateTime.now().year}
+- For long fields (abstract, description, problem, solution, objectives): write 2-4 professional sentences minimum if not found in document
+
+Also generate a "summary" field: a 3-5 sentence executive summary of the entire project based on ALL known information. Make it professional, highlight the problem solved and key technologies.
+
+Return a single valid JSON object with ONLY these keys: ${missingKeys.join(', ')}, summary
+Use "" for any field you truly cannot determine even from context.
+All values on ONE LINE. Return ONLY the JSON, no markdown, no backticks.
+''';
+
+    parts.add({'text': prompt});
+
+    final raw = await _callGemini(parts, maxTokens: 4096, timeoutSecs: 60);
+    if (raw == null) {
+      onProgress?.call('Failed', 1.0);
+      return {'summary': '', 'filledFields': {}};
+    }
+
+    onProgress?.call('Parsing results...', 0.85);
+
+    // Parse the response
+    try {
+      String cleaned = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+      final first = cleaned.indexOf('{');
+      final last  = cleaned.lastIndexOf('}');
+      if (first == -1 || last == -1) return {'summary': '', 'filledFields': {}};
+      cleaned = cleaned.substring(first, last + 1);
+      cleaned = _repairJson(cleaned);
+      final decoded = jsonDecode(cleaned) as Map<String, dynamic>;
+
+      final filledFields = <String, Map<String, dynamic>>{};
+      for (final key in missingKeys) {
+        final val = decoded[key]?.toString().trim() ?? '';
+        if (val.isNotEmpty) {
+          filledFields[key] = {'value': val, 'confidence': _score(val, key)};
+          print('[OCR] fillMissing + $key: "${val.substring(0, val.length.clamp(0, 60))}..."');
+        }
+      }
+
+      final summary = decoded['summary']?.toString().trim() ?? '';
+      onProgress?.call('Done', 1.0);
+      return {'summary': summary, 'filledFields': filledFields};
+    } catch (e) {
+      print('[OCR] fillMissing parse error: $e');
+      onProgress?.call('Done', 1.0);
+      return {'summary': '', 'filledFields': {}};
+    }
+  }
+
+  /// Generate content for a SINGLE field based on full project context.
+  /// Used when user taps ✨ on an individual field.
+  static Future<String> generateFieldFromContext({
+    required String fieldName,
+    required Map<String, String> allFields,
+    List<String> imagePaths = const [],
+  }) async {
+    final parts = <Map<String, dynamic>>[];
+
+    for (final path in imagePaths) {
+      try {
+        final bytes = await File(path).readAsBytes();
+        parts.add({
+          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+        });
+      } catch (e) {
+        print('[OCR] Could not read $path: $e');
+      }
+    }
+
+    final contextLines = <String>[];
+    allFields.forEach((key, value) {
+      if (value.isNotEmpty && key != fieldName) {
+        contextLines.add('$key: $value');
+      }
+    });
+
+    final context = contextLines.join('\n');
+    final fieldContext = _fieldContext[fieldName] ?? 'Content for $fieldName';
+    final fieldInstruction = _fieldInstructions[fieldName] ?? 'Generate the $fieldName.';
+
+    final prompt = '''
+You are writing content for a graduation project field.
+
+PROJECT CONTEXT:
+$context
+
+FIELD TO GENERATE: "$fieldName"
+WHAT IT SHOULD CONTAIN: $fieldContext
+INSTRUCTION: $fieldInstruction
+
+RULES:
+- If document images show the content verbatim, COPY it word-for-word
+- Otherwise, infer and write professional academic content based on the project context
+- Do NOT include section headings or labels in your output
+- Write in a professional academic tone
+- Be specific to this project, not generic
+- For "category": return ONLY ONE of: Medical, Education, Finance, E-Commerce, Social Media, Entertainment, Transportation, Smart Agriculture, IoT/Smart Home, Manufacturing, Other
+- For "year": return ONLY the 4-digit year
+- Return ONLY the content — no labels, no JSON, no markdown
+- If you truly cannot determine it: return NOT_FOUND
+''';
+
+    parts.add({'text': prompt});
+
+    final raw = await _callGemini(parts, maxTokens: 2048, timeoutSecs: 40);
+    if (raw == null) return '';
+    final text = raw.trim();
+    return text == 'NOT_FOUND' ? '' : text;
+  }
+
+  /// Generate a project summary from all available fields.
+  /// Returns a plain-text summary string.
+  static Future<String> generateSummary({
+    required Map<String, String> existingFields,
+    List<String> imagePaths = const [],
+  }) async {
+    final parts = <Map<String, dynamic>>[];
+
+    for (final path in imagePaths) {
+      try {
+        final bytes = await File(path).readAsBytes();
+        parts.add({
+          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+        });
+      } catch (e) {}
+    }
+
+    final contextLines = <String>[];
+    existingFields.forEach((key, value) {
+      if (value.isNotEmpty) contextLines.add('$key: $value');
+    });
+
+    parts.add({
+      'text': '''
+Based on this graduation project information:
+
+${contextLines.join('\n')}
+
+Write a professional 4-6 sentence executive summary of this project that:
+1. Starts with what the project is and the problem it solves
+2. Mentions the key technologies used
+3. Highlights the main features or objectives
+4. Mentions the team/supervisor if known
+5. Ends with the project's impact or value
+
+Write in a polished, academic tone. Return ONLY the summary text, no headings, no labels.
+'''
+    });
+
+    final raw = await _callGemini(parts, maxTokens: 1024, timeoutSecs: 40);
+    return raw?.trim() ?? '';
+  }
+
   /// Re-extract a single field from already-scanned pages.
-  /// Appends to existing value rather than replacing.
   static Future<String> extractSingleField(
     String fieldName, {
     List<String> imagePaths = const [],
@@ -182,8 +394,7 @@ class OcrService {
     return text == 'NOT_FOUND' ? '' : text;
   }
 
-  /// Smart override — reads any image, understands content semantically,
-  /// fills the target field regardless of how sections are labeled in the doc.
+  /// Smart override — reads any image, understands content semantically.
   static Future<String> smartScanForField({
     required String fieldName,
     required String imagePath,
@@ -227,14 +438,14 @@ class OcrService {
     String base64Image, {String? fallbackOcrText}) async {
     final raw = await _callGemini([
       {'inline_data': {'mime_type': 'image/jpeg', 'data': base64Image}},
-      {'text': _mainPrompt},
+      {'text': _mainPromptWithSummary},
     ]);
     return raw != null ? _parseResponse(raw) : _emptyResult();
   }
 
   static Future<Map<String, dynamic>> processOCR(String rawText) async {
     final raw = await _callGemini([
-      {'text': 'Document text:\n$rawText\n\n$_mainPrompt'},
+      {'text': 'Document text:\n$rawText\n\n$_mainPromptWithSummary'},
     ]);
     return raw != null ? _parseResponse(raw) : _emptyResult();
   }
@@ -248,7 +459,6 @@ class OcrService {
     int maxTokens   = _maxTokens,
     int timeoutSecs = _timeoutSecs,
   }) async {
-    // Try every available key before giving up
     for (int keyAttempt = 0; keyAttempt < _apiKeys.length; keyAttempt++) {
       final key = _currentKey;
       try {
@@ -271,7 +481,7 @@ class OcrService {
           print('[OCR] Key ${_currentKeyIndex + 1} rate limited — rotating to next key');
           _rotateKey();
           await Future.delayed(const Duration(seconds: 1));
-          continue; // try next key
+          continue;
         }
 
         if (response.statusCode != 200) {
@@ -339,6 +549,7 @@ class OcrService {
       final decoded = jsonDecode(cleaned) as Map<String, dynamic>;
       final result  = <String, dynamic>{};
 
+      // Extract normal fields
       for (final key in _allKeys) {
         final val = decoded[key]?.toString().trim() ?? '';
         result[key] = {
@@ -349,6 +560,13 @@ class OcrService {
           print('[OCR] + $key: "${val.substring(0, val.length.clamp(0, 55))}..."');
         }
       }
+
+      // Extract summary if present
+      final summaryVal = decoded['summary']?.toString().trim() ?? '';
+      result['summary'] = {
+        'value':      summaryVal,
+        'confidence': summaryVal.isNotEmpty ? 0.95 : 0.0,
+      };
 
       return result;
     } catch (e) {
@@ -387,7 +605,7 @@ class OcrService {
     print('[OCR] Regex salvage mode');
     final result = <String, dynamic>{};
 
-    for (final key in _allKeys) {
+    for (final key in [..._allKeys, 'summary']) {
       final match = RegExp('"$key"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"').firstMatch(raw);
       final value = match?.group(1)?.trim() ?? '';
       result[key] = {'value': value, 'confidence': value.isNotEmpty ? 0.6 : 0.0};
@@ -396,7 +614,6 @@ class OcrService {
     return result;
   }
 
-  /// Improved confidence scoring — checks quality signals, not just length
   static double _score(String value, String key) {
     if (value.isEmpty) return 0.0;
     if (key == 'year')     return RegExp(r'^\d{4}$').hasMatch(value) ? 0.97 : 0.4;
@@ -406,25 +623,21 @@ class OcrService {
     if (isLong) {
       double score = 0.0;
 
-      // Length check
       if (value.length > 500)      score += 0.35;
       else if (value.length > 300) score += 0.25;
       else if (value.length > 100) score += 0.15;
       else                         score += 0.05;
 
-      // Ends properly (not mid-sentence)
       final trimmed = value.trimRight();
       if (trimmed.endsWith('.') || trimmed.endsWith('?') ||
           trimmed.endsWith('!') || trimmed.endsWith(':')) {
         score += 0.25;
       } else if (trimmed.endsWith(',') || trimmed.endsWith(';')) {
-        score += 0.05; // likely truncated
+        score += 0.05;
       }
 
-      // Contains structured content (numbered/bulleted lists)
       if (RegExp(r'(\d+[\.\)]|\•|\-)\s').hasMatch(value)) score += 0.20;
 
-      // Penalize AI summary phrases — means it paraphrased instead of copying
       final aiPhrases = [
         'in summary', 'to summarize', 'in conclusion',
         'the document states', 'according to the document',
@@ -433,7 +646,6 @@ class OcrService {
       final lower = value.toLowerCase();
       if (aiPhrases.any((p) => lower.contains(p))) score -= 0.30;
 
-      // Penalize suspiciously short long fields
       if (value.length < 80) score -= 0.20;
 
       return score.clamp(0.0, 1.0);
@@ -446,7 +658,7 @@ class OcrService {
   // PROMPTS & METADATA
   // ═══════════════════════════════════════════════════════════════════════════
 
-  static const String _mainPrompt = '''
+  static const String _mainPromptWithSummary = '''
 You are analyzing a graduation project document from an Egyptian university.
 Formats vary widely. Use visual intelligence to find and extract each field.
 
@@ -465,6 +677,7 @@ FIELDS:
 - problem: COPY word-for-word from the Problem section ONLY. Every sentence and numbered point. Do NOT truncate.
 - solution: COPY word-for-word from the Solution/Methodology section ONLY. Every sentence. Do NOT truncate.
 - objectives: COPY word-for-word from the Objectives section ONLY. Every bullet and number. Do NOT include Project Overview or any other section.
+- summary: Write a 3-5 sentence professional executive summary of the entire project. Highlight the problem, solution, technologies, and value. If too few fields are extracted, write "" for this.
 
 RULES:
 1. Return ONLY the JSON — no markdown, no backticks, no extra text
@@ -473,10 +686,10 @@ RULES:
 4. NEVER invent data — use "" if not found
 5. NEVER merge content from different sections into one field
 6. Remove section labels from the start of values
-7. COPY text exactly — do NOT paraphrase or summarize
+7. COPY text exactly — do NOT paraphrase or summarize (except for summary field)
 ''';
 
-  static const String _enhancedPrompt = '''
+  static const String _enhancedPromptWithSummary = '''
 CAREFUL EXTRACTION REQUIRED — previous attempt missed many fields.
 
 Look thoroughly through the entire document. These sections may use alternative names:
@@ -488,12 +701,14 @@ Look thoroughly through the entire document. These sections may use alternative 
 - "supervisor" = Under Supervision of, Advisor, Instructor, Project Advisor
 
 Return a single valid JSON with ALL of these keys:
-title, students, supervisor, year, category, technologies, keywords, abstract, description, problem, solution, objectives
+title, students, supervisor, year, category, technologies, keywords, abstract, description, problem, solution, objectives, summary
+
+For the "summary" field: write a 3-5 sentence professional executive summary based on all extracted content.
 
 STRICT RULES:
 1. Return ONLY valid JSON — no markdown, no backticks
 2. All values on ONE LINE (replace newlines with space)
-3. COPY text EXACTLY word-for-word — do NOT paraphrase
+3. COPY text EXACTLY word-for-word for all fields except summary
 4. NEVER merge two different sections into one field
 5. Each field must contain content from ONE section only
 6. Remove section heading labels from values
@@ -537,6 +752,6 @@ STRICT RULES:
   ];
 
   static Map<String, dynamic> _emptyResult() => {
-    for (final k in _allKeys) k: {'value': '', 'confidence': 0.0}
+    for (final k in [..._allKeys, 'summary']) k: {'value': '', 'confidence': 0.0}
   };
 }
