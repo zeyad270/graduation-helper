@@ -23,7 +23,16 @@ class ImageService {
 
       final directory = await getTemporaryDirectory();
       final processedPath = '${directory.path}/processed_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final processedFile = File(processedPath)..writeAsBytesSync(img.encodeJpg(image, quality: 95));
+      // In preprocessImage, change quality from 95 to 75
+      final processedFile = File(processedPath)
+        ..writeAsBytesSync(img.encodeJpg(image, quality: 75));
+
+      // Also tighten the resize — lower the max width
+      if (image.width > 1800) {
+        image = img.copyResize(image, width: 1800);
+      } else if (image.width < 1000) {
+        image = img.copyResize(image, width: 1200);
+      }
       
       return processedFile;
     } catch (e) {

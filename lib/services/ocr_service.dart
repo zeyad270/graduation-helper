@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
+import 'package:grad_ocr_hive/services/image_service.dart';
 import 'package:http/http.dart' as http;
 
 /// Vision-first OCR service with full reliability stack:
@@ -75,7 +76,8 @@ class OcrService {
         0.1 + (i / imagePaths.length) * 0.3,
       );
       try {
-        final bytes = await File(imagePaths[i]).readAsBytes();
+        final processed = await ImageService.preprocessImage(imagePaths[i]);
+        final bytes = await processed.readAsBytes();
         if (bytes.length < 5000) {
           print('[OCR] Warning: page ${i+1} is very small — may be low quality');
         }
