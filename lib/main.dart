@@ -5,10 +5,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: '.env');
-  await Hive.initFlutter();
-  runApp(const MyApp());
   await Hive.initFlutter();
   runApp(const MyApp());
 }

@@ -23,6 +23,8 @@ class OcrService {
   // ═══════════════════════════════════════════════════════════════════════════
   static List<String> get _apiKeys => [
     dotenv.env['GEMINI_KEY_1'] ?? '',
+    dotenv.env['GEMINI_KEY_2'] ?? '',
+    dotenv.env['GEMINI_KEY_3'] ?? '',
   ].where((k) => k.isNotEmpty).toList();
   // Add to OcrService class:
   static final Map<String, String> _preprocessedCache = {};
