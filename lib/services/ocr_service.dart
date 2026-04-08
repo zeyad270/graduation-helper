@@ -16,17 +16,17 @@ import 'package:http/http.dart' as http;
 /// - Per-field AI generation from context
 /// - Summary generation
 class OcrService {
-
   // ═══════════════════════════════════════════════════════════════════════════
   // ✏️  PUT YOUR API KEYS HERE
   // ═══════════════════════════════════════════════════════════════════════════
   static const List<String> _apiKeys = [
-    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
-    'AIzaSyDUnS-PQ0tN5S9aOGXsk4KPY9CqRdIUrSE',
-    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
-    'AIzaSyDTVoQJEt9K4NCjyizW8E1r__RvDPbKTCg',
-    'AIzaSyDZm5_Ex_erY6lPhsAHFShlLjdClOovm2U',
-    'AIzaSyDwbfwEA3eb-SOnQ7kNXe7o6lySNP4LbTo',
+    'AIzaSyAjDZNKQcZnSHVZu1AJwtemiCLWHW5XgEQ',
+    // 'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
+    // 'AIzaSyDUnS-PQ0tN5S9aOGXsk4KPY9CqRdIUrSE',
+    // 'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
+    // 'AIzaSyDTVoQJEt9K4NCjyizW8E1r__RvDPbKTCg',
+    // 'AIzaSyDZm5_Ex_erY6lPhsAHFShlLjdClOovm2U',
+    // 'AIzaSyDwbfwEA3eb-SOnQ7kNXe7o6lySNP4LbTo',
   ];
   // Add to OcrService class:
   static final Map<String, String> _preprocessedCache = {};
@@ -40,12 +40,13 @@ class OcrService {
     _preprocessedCache[originalPath] = processed.path;
     return processed.path;
   }
+
   static const String _baseUrl =
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=';
 
-  static const int _maxRetries  = 1;
-  static const int _timeoutSecs = 45; // was 60
-  static const int _maxTokens   = 4096; // was 8192
+  static const int _maxRetries = 1;
+  static const int _timeoutSecs = 60; // was 60
+  static const int _maxTokens = 8192; // was 8192
 
   static int _currentKeyIndex = 0;
 
@@ -74,7 +75,7 @@ class OcrService {
   /// Returns extracted fields + a 'summary' key.
   static Future<Map<String, dynamic>> extractFromAll({
     List<String> imagePaths = const [],
-    List<String> rawTexts   = const [],
+    List<String> rawTexts = const [],
     void Function(String step, double progress)? onProgress,
   }) async {
     onProgress?.call('Preparing pages...', 0.1);
@@ -88,14 +89,22 @@ class OcrService {
       );
       try {
         final processed = await ImageService.preprocessImage(imagePaths[i]);
-        final bytes = await processed.readAsBytes(); // added this to get size after preprocessing
+        final bytes = await processed
+            .readAsBytes(); // added this to get size after preprocessing
         if (bytes.length < 5000) {
-          print('[OCR] Warning: page ${i+1} is very small — may be low quality');
+          print(
+            '[OCR] Warning: page ${i + 1} is very small — may be low quality',
+          );
         }
         parts.add({
-          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+          'inline_data': {
+            'mime_type': 'image/jpeg',
+            'data': base64Encode(bytes),
+          },
         });
-        print('[OCR] Page ${i+1}: ${(bytes.length / 1024).toStringAsFixed(0)} KB');
+        print(
+          '[OCR] Page ${i + 1}: ${(bytes.length / 1024).toStringAsFixed(0)} KB',
+        );
       } catch (e) {
         print('[OCR] Failed to read image ${imagePaths[i]}: $e');
       }
@@ -118,26 +127,34 @@ class OcrService {
       if (attempt > 1) {
         final waitSecs = attempt * 2;
         print('[OCR] Retry $attempt/$_maxRetries — waiting ${waitSecs}s');
-        onProgress?.call('Retrying extraction (attempt $attempt)...', 0.5 + attempt * 0.05);
+        onProgress?.call(
+          'Retrying extraction (attempt $attempt)...',
+          0.5 + attempt * 0.05,
+        );
         await Future.delayed(Duration(seconds: waitSecs));
         currentPrompt = _enhancedPromptWithSummary;
       } else {
         onProgress?.call('Analyzing with Gemini Vision...', 0.5);
       }
 
-      final promptParts = [...parts, {'text': currentPrompt}];
+      final promptParts = [
+        ...parts,
+        {'text': currentPrompt},
+      ];
       final raw = await _callGemini(promptParts);
       if (raw == null) continue;
 
-      final result      = _parseResponse(raw);
+      final result = _parseResponse(raw);
       final filledCount = _allKeys
           .where((k) => (result[k]?['value'] as String? ?? '').isNotEmpty)
           .length;
 
-      print('[OCR] Attempt $attempt: $filledCount/${_allKeys.length} fields filled');
+      print(
+        '[OCR] Attempt $attempt: $filledCount/${_allKeys.length} fields filled',
+      );
 
       if (filledCount > bestFilledCount) {
-        bestResult      = result;
+        bestResult = result;
         bestFilledCount = filledCount;
       }
 
@@ -163,12 +180,18 @@ class OcrService {
 
     // Add images if available
     for (int i = 0; i < imagePaths.length; i++) {
-      onProgress?.call('Loading page ${i + 1}...', 0.1 + (i / imagePaths.length) * 0.25);
+      onProgress?.call(
+        'Loading page ${i + 1}...',
+        0.1 + (i / imagePaths.length) * 0.25,
+      );
       try {
         final processed = await ImageService.preprocessImage(imagePaths[i]);
         final bytes = await processed.readAsBytes();
         parts.add({
-          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+          'inline_data': {
+            'mime_type': 'image/jpeg',
+            'data': base64Encode(bytes),
+          },
         });
       } catch (e) {
         print('[OCR] Could not read $e');
@@ -196,12 +219,16 @@ class OcrService {
       return {'summary': summary, 'filledFields': {}};
     }
 
-    onProgress?.call('Asking AI to fill ${missingKeys.length} missing fields...', 0.4);
+    onProgress?.call(
+      'Asking AI to fill ${missingKeys.length} missing fields...',
+      0.4,
+    );
 
     final contextText = contextLines.join('\n');
     final missingList = missingKeys.join(', ');
 
-    final prompt = '''
+    final prompt =
+        '''
 You are analyzing a graduation project. Here is the known information about this project:
 
 $contextText
@@ -237,9 +264,12 @@ All values on ONE LINE. Return ONLY the JSON, no markdown, no backticks.
 
     // Parse the response
     try {
-      String cleaned = raw.replaceAll('```json', '').replaceAll('```', '').trim();
+      String cleaned = raw
+          .replaceAll('```json', '')
+          .replaceAll('```', '')
+          .trim();
       final first = cleaned.indexOf('{');
-      final last  = cleaned.lastIndexOf('}');
+      final last = cleaned.lastIndexOf('}');
       if (first == -1 || last == -1) return {'summary': '', 'filledFields': {}};
       cleaned = cleaned.substring(first, last + 1);
       cleaned = _repairJson(cleaned);
@@ -250,7 +280,9 @@ All values on ONE LINE. Return ONLY the JSON, no markdown, no backticks.
         final val = decoded[key]?.toString().trim() ?? '';
         if (val.isNotEmpty) {
           filledFields[key] = {'value': val, 'confidence': _score(val, key)};
-          print('[OCR] fillMissing + $key: "${val.substring(0, val.length.clamp(0, 60))}..."');
+          print(
+            '[OCR] fillMissing + $key: "${val.substring(0, val.length.clamp(0, 60))}..."',
+          );
         }
       }
 
@@ -277,7 +309,10 @@ All values on ONE LINE. Return ONLY the JSON, no markdown, no backticks.
       try {
         final bytes = await File(path).readAsBytes();
         parts.add({
-          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+          'inline_data': {
+            'mime_type': 'image/jpeg',
+            'data': base64Encode(bytes),
+          },
         });
       } catch (e) {
         print('[OCR] Could not read $path: $e');
@@ -293,9 +328,11 @@ All values on ONE LINE. Return ONLY the JSON, no markdown, no backticks.
 
     final context = contextLines.join('\n');
     final fieldContext = _fieldContext[fieldName] ?? 'Content for $fieldName';
-    final fieldInstruction = _fieldInstructions[fieldName] ?? 'Generate the $fieldName.';
+    final fieldInstruction =
+        _fieldInstructions[fieldName] ?? 'Generate the $fieldName.';
 
-    final prompt = '''
+    final prompt =
+        '''
 You are writing content for a graduation project field.
 
 PROJECT CONTEXT:
@@ -337,7 +374,10 @@ RULES:
       try {
         final bytes = await File(path).readAsBytes();
         parts.add({
-          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+          'inline_data': {
+            'mime_type': 'image/jpeg',
+            'data': base64Encode(bytes),
+          },
         });
       } catch (e) {}
     }
@@ -348,7 +388,8 @@ RULES:
     });
 
     parts.add({
-      'text': '''
+      'text':
+          '''
 Based on this graduation project information:
 
 ${contextLines.join('\n')}
@@ -361,7 +402,7 @@ Write a professional 4-6 sentence executive summary of this project that:
 5. Ends with the project's impact or value
 
 Write in a polished, academic tone. Return ONLY the summary text, no headings, no labels.
-'''
+''',
     });
 
     final raw = await _callGemini(parts, maxTokens: 1024, timeoutSecs: 40);
@@ -372,7 +413,7 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
   static Future<String> extractSingleField(
     String fieldName, {
     List<String> imagePaths = const [],
-    String fallbackText     = '',
+    String fallbackText = '',
   }) async {
     final instruction = _fieldInstructions[fieldName];
     if (instruction == null) return '';
@@ -383,7 +424,10 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
       try {
         final bytes = await File(path).readAsBytes();
         parts.add({
-          'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
+          'inline_data': {
+            'mime_type': 'image/jpeg',
+            'data': base64Encode(bytes),
+          },
         });
       } catch (e) {
         print('[OCR] Could not read $path: $e');
@@ -397,14 +441,17 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
     if (parts.isEmpty) return '';
 
     parts.add({
-      'text': '$instruction\n\nReturn ONLY the extracted text. No labels. No JSON.\nIf not found: NOT_FOUND'
+      'text':
+          '$instruction\n\nReturn ONLY the extracted text. No labels. No JSON.\nIf not found: NOT_FOUND',
     });
 
     final raw = await _callGemini(parts, maxTokens: 2048, timeoutSecs: 40);
     if (raw == null) return '';
 
     final text = raw.trim();
-    print('[OCR] extractSingleField ($fieldName): "${text.substring(0, text.length.clamp(0, 80))}..."');
+    print(
+      '[OCR] extractSingleField ($fieldName): "${text.substring(0, text.length.clamp(0, 80))}..."',
+    );
     return text == 'NOT_FOUND' ? '' : text;
   }
 
@@ -415,7 +462,7 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
   }) async {
     try {
       final bytes = await File(imagePath).readAsBytes();
-      final b64   = base64Encode(bytes);
+      final b64 = base64Encode(bytes);
 
       final context = _fieldContext[fieldName] ?? 'The $fieldName content.';
 
@@ -432,14 +479,22 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
           '- If page has no relevant content, return: NOT_FOUND\n\n'
           'Return ONLY the clean verbatim text. Nothing else.';
 
-      final raw = await _callGemini([
-        {'inline_data': {'mime_type': 'image/jpeg', 'data': b64}},
-        {'text': prompt},
-      ], maxTokens: 2048, timeoutSecs: 40);
+      final raw = await _callGemini(
+        [
+          {
+            'inline_data': {'mime_type': 'image/jpeg', 'data': b64},
+          },
+          {'text': prompt},
+        ],
+        maxTokens: 2048,
+        timeoutSecs: 40,
+      );
 
       if (raw == null) return '';
       final text = raw.trim();
-      print('[OCR] smartScan ($fieldName): "${text.substring(0, text.length.clamp(0, 80))}..."');
+      print(
+        '[OCR] smartScan ($fieldName): "${text.substring(0, text.length.clamp(0, 80))}..."',
+      );
       return text == 'NOT_FOUND' ? '' : text;
     } catch (e) {
       print('[OCR] smartScanForField error: $e');
@@ -449,9 +504,13 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
 
   // Legacy compatibility
   static Future<Map<String, dynamic>> extractFromImage(
-    String base64Image, {String? fallbackOcrText}) async {
+    String base64Image, {
+    String? fallbackOcrText,
+  }) async {
     final raw = await _callGemini([
-      {'inline_data': {'mime_type': 'image/jpeg', 'data': base64Image}},
+      {
+        'inline_data': {'mime_type': 'image/jpeg', 'data': base64Image},
+      },
       {'text': _mainPromptWithSummary},
     ]);
     return raw != null ? _parseResponse(raw) : _emptyResult();
@@ -470,29 +529,37 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
 
   static Future<String?> _callGemini(
     List<Map<String, dynamic>> parts, {
-    int maxTokens   = _maxTokens,
+    int maxTokens = _maxTokens,
     int timeoutSecs = _timeoutSecs,
   }) async {
     for (int keyAttempt = 0; keyAttempt < _apiKeys.length; keyAttempt++) {
       final key = _currentKey;
       try {
-        final response = await http.post(
-          Uri.parse('$_baseUrl$key'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'contents': [{'parts': parts}],
-            'generationConfig': {
-              'temperature': 0.1,
-              'maxOutputTokens': maxTokens,
-              'topP': 0.95,
-            },
-          }),
-        ).timeout(Duration(seconds: timeoutSecs));
+        final response = await http
+            .post(
+              Uri.parse('$_baseUrl$key'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'contents': [
+                  {'parts': parts},
+                ],
+                'generationConfig': {
+                  'temperature': 0.1,
+                  'maxOutputTokens': maxTokens,
+                  'topP': 0.95,
+                },
+              }),
+            )
+            .timeout(Duration(seconds: timeoutSecs));
 
-        print('[OCR] Status: ${response.statusCode} (key ${_currentKeyIndex + 1}/${_apiKeys.length})');
+        print(
+          '[OCR] Status: ${response.statusCode} (key ${_currentKeyIndex + 1}/${_apiKeys.length})',
+        );
 
         if (response.statusCode == 429) {
-          print('[OCR] Key ${_currentKeyIndex + 1} rate limited — rotating to next key');
+          print(
+            '[OCR] Key ${_currentKeyIndex + 1} rate limited — rotating to next key',
+          );
           _rotateKey();
           await Future.delayed(const Duration(seconds: 1));
           continue;
@@ -504,8 +571,9 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
           return null;
         }
 
-        final decoded      = jsonDecode(response.body);
-        final finishReason = decoded['candidates']?[0]?['finishReason'] as String?;
+        final decoded = jsonDecode(response.body);
+        final finishReason =
+            decoded['candidates']?[0]?['finishReason'] as String?;
 
         if (finishReason == 'SAFETY' || finishReason == 'RECITATION') {
           print('[OCR] Blocked: $finishReason');
@@ -516,7 +584,9 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
           print('[OCR] WARNING: Response truncated at $maxTokens tokens');
         }
 
-        final text = decoded['candidates']?[0]?['content']?['parts']?[0]?['text'] as String?;
+        final text =
+            decoded['candidates']?[0]?['content']?['parts']?[0]?['text']
+                as String?;
         if (text == null || text.isEmpty) {
           print('[OCR] Empty response');
           return null;
@@ -524,7 +594,6 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
 
         print('[OCR] Response: ${text.length} chars');
         return text;
-
       } on TimeoutException {
         print('[OCR] Timeout after ${timeoutSecs}s');
         return null;
@@ -550,7 +619,7 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
           .trim();
 
       final first = cleaned.indexOf('{');
-      final last  = cleaned.lastIndexOf('}');
+      final last = cleaned.lastIndexOf('}');
 
       if (first == -1 || last == -1 || last <= first) {
         print('[OCR] No JSON object found — regex salvage');
@@ -561,24 +630,23 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
       cleaned = _repairJson(cleaned);
 
       final decoded = jsonDecode(cleaned) as Map<String, dynamic>;
-      final result  = <String, dynamic>{};
+      final result = <String, dynamic>{};
 
       // Extract normal fields
       for (final key in _allKeys) {
         final val = decoded[key]?.toString().trim() ?? '';
-        result[key] = {
-          'value':      val,
-          'confidence': _score(val, key),
-        };
+        result[key] = {'value': val, 'confidence': _score(val, key)};
         if (val.isNotEmpty) {
-          print('[OCR] + $key: "${val.substring(0, val.length.clamp(0, 55))}..."');
+          print(
+            '[OCR] + $key: "${val.substring(0, val.length.clamp(0, 55))}..."',
+          );
         }
       }
 
       // Extract summary if present
       final summaryVal = decoded['summary']?.toString().trim() ?? '';
       result['summary'] = {
-        'value':      summaryVal,
+        'value': summaryVal,
         'confidence': summaryVal.isNotEmpty ? 0.95 : 0.0,
       };
 
@@ -595,8 +663,8 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
       return json;
     } catch (_) {}
 
-    String r      = json.trimRight();
-    final quotes  = r.split('"').length - 1;
+    String r = json.trimRight();
+    final quotes = r.split('"').length - 1;
     if (quotes % 2 != 0) r += '"';
 
     int open = 0;
@@ -620,9 +688,14 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
     final result = <String, dynamic>{};
 
     for (final key in [..._allKeys, 'summary']) {
-      final match = RegExp('"$key"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"').firstMatch(raw);
+      final match = RegExp(
+        '"$key"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"',
+      ).firstMatch(raw);
       final value = match?.group(1)?.trim() ?? '';
-      result[key] = {'value': value, 'confidence': value.isNotEmpty ? 0.6 : 0.0};
+      result[key] = {
+        'value': value,
+        'confidence': value.isNotEmpty ? 0.6 : 0.0,
+      };
     }
 
     return result;
@@ -630,21 +703,33 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
 
   static double _score(String value, String key) {
     if (value.isEmpty) return 0.0;
-    if (key == 'year')     return RegExp(r'^\d{4}$').hasMatch(value) ? 0.97 : 0.4;
+    if (key == 'year') return RegExp(r'^\d{4}$').hasMatch(value) ? 0.97 : 0.4;
     if (key == 'category') return 0.92;
 
-    final isLong = ['abstract', 'description', 'problem', 'solution', 'objectives'].contains(key);
+    final isLong = [
+      'abstract',
+      'description',
+      'problem',
+      'solution',
+      'objectives',
+    ].contains(key);
     if (isLong) {
       double score = 0.0;
 
-      if (value.length > 500)      score += 0.35;
-      else if (value.length > 300) score += 0.25;
-      else if (value.length > 100) score += 0.15;
-      else                         score += 0.05;
+      if (value.length > 500)
+        score += 0.35;
+      else if (value.length > 300)
+        score += 0.25;
+      else if (value.length > 100)
+        score += 0.15;
+      else
+        score += 0.05;
 
       final trimmed = value.trimRight();
-      if (trimmed.endsWith('.') || trimmed.endsWith('?') ||
-          trimmed.endsWith('!') || trimmed.endsWith(':')) {
+      if (trimmed.endsWith('.') ||
+          trimmed.endsWith('?') ||
+          trimmed.endsWith('!') ||
+          trimmed.endsWith(':')) {
         score += 0.25;
       } else if (trimmed.endsWith(',') || trimmed.endsWith(';')) {
         score += 0.05;
@@ -653,9 +738,13 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
       if (RegExp(r'(\d+[\.\)]|\•|\-)\s').hasMatch(value)) score += 0.20;
 
       final aiPhrases = [
-        'in summary', 'to summarize', 'in conclusion',
-        'the document states', 'according to the document',
-        'the text mentions', 'as mentioned',
+        'in summary',
+        'to summarize',
+        'in conclusion',
+        'the document states',
+        'according to the document',
+        'the text mentions',
+        'as mentioned',
       ];
       final lower = value.toLowerCase();
       if (aiPhrases.any((p) => lower.contains(p))) score -= 0.30;
@@ -730,42 +819,67 @@ STRICT RULES:
 ''';
 
   static const Map<String, String> _fieldInstructions = {
-    'title':        'Extract ONLY the specific project title. NOT university or faculty name.',
-    'students':     'Extract ALL student full names as comma-separated list.',
-    'supervisor':   'Extract supervisor full name with title (Dr./Prof./Eng.).',
-    'year':         'Extract the 4-digit submission year only.',
-    'category':     'Pick ONE: Medical, Education, Finance, E-Commerce, Social Media, Entertainment, Transportation, Smart Agriculture, IoT/Smart Home, Manufacturing, Other',
-    'technologies': 'List all technologies, frameworks, programming languages mentioned.',
-    'keywords':     'Extract keywords from explicit Keywords section only. Comma-separated.',
-    'abstract':     'Extract the COMPLETE abstract. Copy every sentence word-for-word. Remove the label. Do NOT include any other section.',
-    'description':  'Extract the first Overview or Introduction section ONLY. Copy word-for-word. Stop at the next subheading. Do NOT combine with Project Overview or other sections.',
-    'problem':      'Extract the COMPLETE problem statement. Copy every sentence and numbered point word-for-word.',
-    'solution':     'Extract the COMPLETE proposed solution. Copy every sentence word-for-word.',
-    'objectives':   'Extract the COMPLETE objectives section ONLY. Copy every bullet and numbered item word-for-word. Do NOT include Project Overview.',
+    'title':
+        'Extract ONLY the specific project title. NOT university or faculty name.',
+    'students': 'Extract ALL student full names as comma-separated list.',
+    'supervisor': 'Extract supervisor full name with title (Dr./Prof./Eng.).',
+    'year': 'Extract the 4-digit submission year only.',
+    'category':
+        'Pick ONE: Medical, Education, Finance, E-Commerce, Social Media, Entertainment, Transportation, Smart Agriculture, IoT/Smart Home, Manufacturing, Other',
+    'technologies':
+        'List all technologies, frameworks, programming languages mentioned.',
+    'keywords':
+        'Extract keywords from explicit Keywords section only. Comma-separated.',
+    'abstract':
+        'Extract the COMPLETE abstract. Copy every sentence word-for-word. Remove the label. Do NOT include any other section.',
+    'description':
+        'Extract the first Overview or Introduction section ONLY. Copy word-for-word. Stop at the next subheading. Do NOT combine with Project Overview or other sections.',
+    'problem':
+        'Extract the COMPLETE problem statement. Copy every sentence and numbered point word-for-word.',
+    'solution':
+        'Extract the COMPLETE proposed solution. Copy every sentence word-for-word.',
+    'objectives':
+        'Extract the COMPLETE objectives section ONLY. Copy every bullet and numbered item word-for-word. Do NOT include Project Overview.',
   };
 
   static const Map<String, String> _fieldContext = {
-    'abstract':     'Abstract or executive summary — labeled: Abstract, Summary, Executive Summary. NOT a chapter introduction.',
-    'description':  'The FIRST overview/introduction section only (e.g. 1.1 Overview). Copy word-for-word. Stop at the next subheading. Do NOT include 1.4 Project Overview or similar later sections.',
-    'problem':      'Problem statement — labeled: Problem, Problem Statement, Problem Definition, Challenges, Issues, Motivation.',
-    'solution':     'Proposed solution — labeled: Solution, Proposed Solution, Approach, Methodology, System Design.',
-    'objectives':   'Objectives/goals section ONLY — labeled: Objectives, Goals, Aims, Targets. Include ALL numbered/bulleted items. Do NOT include Project Overview section.',
-    'technologies': 'Technology stack — tools, languages, frameworks, databases.',
-    'keywords':     'Keywords listed explicitly under a Keywords label.',
-    'title':        'The main project title.',
-    'supervisor':   'Supervisor or advisor with title Dr./Prof./Eng.',
-    'students':     'All student names.',
-    'year':         'Submission or academic year.',
-    'category':     'Project category or domain.',
+    'abstract':
+        'Abstract or executive summary — labeled: Abstract, Summary, Executive Summary. NOT a chapter introduction.',
+    'description':
+        'The FIRST overview/introduction section only (e.g. 1.1 Overview). Copy word-for-word. Stop at the next subheading. Do NOT include 1.4 Project Overview or similar later sections.',
+    'problem':
+        'Problem statement — labeled: Problem, Problem Statement, Problem Definition, Challenges, Issues, Motivation.',
+    'solution':
+        'Proposed solution — labeled: Solution, Proposed Solution, Approach, Methodology, System Design.',
+    'objectives':
+        'Objectives/goals section ONLY — labeled: Objectives, Goals, Aims, Targets. Include ALL numbered/bulleted items. Do NOT include Project Overview section.',
+    'technologies':
+        'Technology stack — tools, languages, frameworks, databases.',
+    'keywords': 'Keywords listed explicitly under a Keywords label.',
+    'title': 'The main project title.',
+    'supervisor': 'Supervisor or advisor with title Dr./Prof./Eng.',
+    'students': 'All student names.',
+    'year': 'Submission or academic year.',
+    'category': 'Project category or domain.',
   };
 
   static const List<String> _allKeys = [
-    'title', 'students', 'supervisor', 'year', 'abstract',
-    'technologies', 'description', 'keywords', 'category',
-    'problem', 'solution', 'objectives',
+    'title',
+    'students',
+    'supervisor',
+    'year',
+    'abstract',
+    'technologies',
+    'description',
+    'keywords',
+    'category',
+    'problem',
+    'solution',
+    'objectives',
   ];
 
   static Map<String, dynamic> _emptyResult() => {
-    for (final k in [..._allKeys, 'summary']) k: {'value': '', 'confidence': 0.0}
+    for (final k in [..._allKeys, 'summary'])
+      k: {'value': '', 'confidence': 0.0},
   };
 }
