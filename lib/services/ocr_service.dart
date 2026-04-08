@@ -28,13 +28,24 @@ class OcrService {
     'AIzaSyDZm5_Ex_erY6lPhsAHFShlLjdClOovm2U',
     'AIzaSyDwbfwEA3eb-SOnQ7kNXe7o6lySNP4LbTo',
   ];
+  // Add to OcrService class:
+  static final Map<String, String> _preprocessedCache = {};
 
+  static Future<String> _getPreprocessedPath(String originalPath) async {
+    if (_preprocessedCache.containsKey(originalPath)) {
+      final cached = _preprocessedCache[originalPath]!;
+      if (await File(cached).exists()) return cached;
+    }
+    final processed = await ImageService.preprocessImage(originalPath);
+    _preprocessedCache[originalPath] = processed.path;
+    return processed.path;
+  }
   static const String _baseUrl =
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=';
 
   static const int _maxRetries  = 1;
-  static const int _timeoutSecs = 60;
-  static const int _maxTokens   = 8192;
+  static const int _timeoutSecs = 45; // was 60
+  static const int _maxTokens   = 4096; // was 8192
 
   static int _currentKeyIndex = 0;
 
@@ -77,7 +88,7 @@ class OcrService {
       );
       try {
         final processed = await ImageService.preprocessImage(imagePaths[i]);
-        final bytes = await processed.readAsBytes();
+        final bytes = await processed.readAsBytes(); // added this to get size after preprocessing
         if (bytes.length < 5000) {
           print('[OCR] Warning: page ${i+1} is very small — may be low quality');
         }
@@ -154,7 +165,8 @@ class OcrService {
     for (int i = 0; i < imagePaths.length; i++) {
       onProgress?.call('Loading page ${i + 1}...', 0.1 + (i / imagePaths.length) * 0.25);
       try {
-        final bytes = await File(imagePaths[i]).readAsBytes();
+        final processed = await ImageService.preprocessImage(imagePaths[i]);
+        final bytes = await processed.readAsBytes();
         parts.add({
           'inline_data': {'mime_type': 'image/jpeg', 'data': base64Encode(bytes)}
         });

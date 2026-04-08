@@ -9,31 +9,26 @@ class ImageService {
       final imageFile = File(imagePath);
       final bytes = await imageFile.readAsBytes();
       img.Image? image = img.decodeImage(bytes);
-      
       if (image == null) return imageFile;
 
       image = img.grayscale(image);
       image = img.adjustColor(image, contrast: 1.3, brightness: 1.1);
 
-      if (image.width > 3000) {
-        image = img.copyResize(image, width: 3000);
-      } else if (image.width < 1000) {
-        image = img.copyResize(image, width: 1500);
+      // Resize BEFORE encoding (your current code does this after — a bug)
+      if (image.width > 1200) {
+        image = img.copyResize(image, width: 1200);
+      } else if (image.width < 800) {
+        image = img.copyResize(image, width: 800);
       }
 
       final directory = await getTemporaryDirectory();
-      final processedPath = '${directory.path}/processed_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      // In preprocessImage, change quality from 95 to 75
-      final processedFile = File(processedPath)
-        ..writeAsBytesSync(img.encodeJpg(image, quality: 75));
+      final processedPath =
+          '${directory.path}/processed_${DateTime.now().millisecondsSinceEpoch}.jpg';
 
-      // Also tighten the resize — lower the max width
-      if (image.width > 1800) {
-        image = img.copyResize(image, width: 1800);
-      } else if (image.width < 1000) {
-        image = img.copyResize(image, width: 1200);
-      }
-      
+      // Lower quality: 55 instead of 75 — still readable for OCR
+      final processedFile = File(processedPath)
+        ..writeAsBytesSync(img.encodeJpg(image, quality: 55));
+
       return processedFile;
     } catch (e) {
       debugPrint('Preprocessing error: $e');
