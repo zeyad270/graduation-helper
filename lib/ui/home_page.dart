@@ -242,13 +242,14 @@ class _OCRHomePageState extends State<OCRHomePage>
   int get _totalFieldCount => _buildFieldsMap().length;
 
   // ── Image Picking ─────────────────────────────────────────────────────────────
-  Future<void> _pickDocuments(ImageSource source) async {
+Future<void> _pickDocuments(ImageSource source) async {
     try {
       if (source == ImageSource.gallery) {
-        final images = await _picker.pickMultiImage(imageQuality: 90);
+        // Remove imageQuality — you handle compression in ImageService
+        final images = await _picker.pickMultiImage();
         for (final img in images) await _addImage(img);
       } else {
-        final img = await _picker.pickImage(source: ImageSource.camera, imageQuality: 90);
+        final img = await _picker.pickImage(source: ImageSource.camera);
         if (img != null) await _addImage(img);
       }
     } catch (e) {
