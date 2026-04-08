@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:grad_ocr_hive/services/image_service.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// Vision-first OCR service with full reliability stack:
 /// - Rotating API keys (up to 6) to maximize free quota
@@ -20,14 +21,9 @@ class OcrService {
   // ═══════════════════════════════════════════════════════════════════════════
   // ✏️  PUT YOUR API KEYS HERE
   // ═══════════════════════════════════════════════════════════════════════════
-  static const List<String> _apiKeys = [
-    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
-    'AIzaSyDUnS-PQ0tN5S9aOGXsk4KPY9CqRdIUrSE',
-    'AIzaSyBoqaKosaqDPS4ZglNfLtuyPlAXdEmr1x8',
-    'AIzaSyDTVoQJEt9K4NCjyizW8E1r__RvDPbKTCg',
-    'AIzaSyDZm5_Ex_erY6lPhsAHFShlLjdClOovm2U',
-    'AIzaSyDwbfwEA3eb-SOnQ7kNXe7o6lySNP4LbTo',
-  ];
+  static List<String> get _apiKeys => [
+    dotenv.env['GEMINI_KEY_1'] ?? '',
+  ].where((k) => k.isNotEmpty).toList();
   // Add to OcrService class:
   static final Map<String, String> _preprocessedCache = {};
 
