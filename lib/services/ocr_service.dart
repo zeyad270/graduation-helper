@@ -42,7 +42,7 @@ class OcrService {
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=';
 
   static const int _maxRetries  = 1;
-  static const int _timeoutSecs = 45; // was 60
+  static const int _timeoutSecs = 120; // was 60
   static const int _maxTokens   = 4096; // was 8192
 
   static int _currentKeyIndex = 0;
@@ -225,7 +225,7 @@ All values on ONE LINE. Return ONLY the JSON, no markdown, no backticks.
 
     parts.add({'text': prompt});
 
-    final raw = await _callGemini(parts, maxTokens: 4096, timeoutSecs: 60);
+    final raw = await _callGemini(parts, maxTokens: 4096, timeoutSecs: 120);
     if (raw == null) {
       onProgress?.call('Failed', 1.0);
       return {'summary': '', 'filledFields': {}};
@@ -317,7 +317,7 @@ RULES:
 
     parts.add({'text': prompt});
 
-    final raw = await _callGemini(parts, maxTokens: 2048, timeoutSecs: 40);
+    final raw = await _callGemini(parts, maxTokens: 2048, timeoutSecs: 120);
     if (raw == null) return '';
     final text = raw.trim();
     return text == 'NOT_FOUND' ? '' : text;
@@ -362,7 +362,7 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
 '''
     });
 
-    final raw = await _callGemini(parts, maxTokens: 1024, timeoutSecs: 40);
+    final raw = await _callGemini(parts, maxTokens: 1024, timeoutSecs: 120);
     return raw?.trim() ?? '';
   }
 
@@ -398,7 +398,7 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
       'text': '$instruction\n\nReturn ONLY the extracted text. No labels. No JSON.\nIf not found: NOT_FOUND'
     });
 
-    final raw = await _callGemini(parts, maxTokens: 2048, timeoutSecs: 40);
+    final raw = await _callGemini(parts, maxTokens: 2048, timeoutSecs: 120);
     if (raw == null) return '';
 
     final text = raw.trim();
@@ -433,7 +433,7 @@ Write in a polished, academic tone. Return ONLY the summary text, no headings, n
       final raw = await _callGemini([
         {'inline_data': {'mime_type': 'image/jpeg', 'data': b64}},
         {'text': prompt},
-      ], maxTokens: 2048, timeoutSecs: 40);
+      ], maxTokens: 2048, timeoutSecs: 120);
 
       if (raw == null) return '';
       final text = raw.trim();

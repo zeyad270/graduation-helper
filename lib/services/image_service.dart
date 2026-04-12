@@ -53,7 +53,7 @@ class ImageService {
       );
 
       // If processing made it bigger somehow, just use lower quality encode
-      if (processedFile.lengthSync() > bytes.length) {
+      if (processedFile.lengthSync() > bytes.length) {  
         final fallback = File(processedPath)
           ..writeAsBytesSync(img.encodeJpg(image, quality: 25));
         debugPrint(
