@@ -17,6 +17,7 @@ class ProjectInfo {
   final String problem;
   final String solution;
   final String objectives;
+  final String aiSummary;
 
   ProjectInfo({
     this.id,
@@ -34,6 +35,7 @@ class ProjectInfo {
     this.problem = '',
     this.solution = '',
     this.objectives = '',
+    this.aiSummary = '',
   });
 
   ProjectInfo copyWith({
@@ -52,6 +54,7 @@ class ProjectInfo {
     String? problem,
     String? solution,
     String? objectives,
+    String? aiSummary,
   }) {
     return ProjectInfo(
       id: id ?? this.id,
@@ -69,6 +72,7 @@ class ProjectInfo {
       problem: problem ?? this.problem,
       solution: solution ?? this.solution,
       objectives: objectives ?? this.objectives,
+      aiSummary: aiSummary ?? this.aiSummary,
     );
   }
 
@@ -88,6 +92,7 @@ class ProjectInfo {
       'problem': problem,
       'solution': solution,
       'objectives': objectives,
+      'aiSummary': aiSummary, 
     };
   }
 
@@ -121,6 +126,7 @@ class ProjectInfo {
       problem: (map['problem'] as String?) ?? '',
       solution: (map['solution'] as String?) ?? '',
       objectives: (map['objectives'] as String?) ?? '',
+      aiSummary: (map['aiSummary'] as String?) ?? '',
     );
   }
 }

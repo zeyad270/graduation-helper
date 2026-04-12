@@ -26,6 +26,7 @@ class GoogleSheetsService {
           'problem': project.problem,
           'solution': project.solution,
           'objectives': project.objectives,
+          'aiSummary': project.aiSummary,
           'rawOcrText': project.rawOcrText,
         }),
       );
