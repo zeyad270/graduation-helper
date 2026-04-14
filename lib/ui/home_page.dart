@@ -623,9 +623,19 @@ class _OCRHomePageState extends State<OCRHomePage>
       _problemCtrl.text = p.problem;
       _solutionCtrl.text = p.solution;
       _objectivesCtrl.text = p.objectives;
-      _scannedDocs.clear();
-      _projectSummary = '';
-      _tabController.animateTo(0);
+      // ← FIX 2: restore the saved summary
+      _projectSummary = p.aiSummary;
+      _lastExtracted = {};
+      _fieldGenerating.clear();
+    });
+    // ← FIX 1: defer the list clear + tab switch to the next frame
+    // so the Documents tab finishes its current render before _scannedDocs
+    // is mutated — eliminates the index-out-of-bounds crash
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        setState(() => _scannedDocs.clear());
+        _tabController.animateTo(0);
+      }
     });
   }
 
