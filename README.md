@@ -1,16 +1,44 @@
-# grad_ocr_hive
+# Graduation GPRR Helper
 
-A new Flutter project.
+Flutter app for scanning graduation project pages, extracting fields with Gemini,
+storing projects locally, and syncing them to Google Sheets.
 
-## Getting Started
+## Architecture
 
-This project is a starting point for a Flutter application.
+- `lib/`: Flutter app
+- `backend/`: Node.js server that calls Gemini securely
 
-A few resources to get you started if this is your first Flutter project:
+The Flutter app no longer needs Gemini API keys inside the APK. It now sends
+requests to the backend, and the backend talks to Gemini.
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## Flutter Setup
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+1. Copy `.env.example` to `.env` if needed.
+2. Set `BACKEND_URL`.
+
+Examples:
+
+- Android emulator: `BACKEND_URL=http://10.0.2.2:8080`
+- Real phone on same Wi-Fi as your PC: `BACKEND_URL=http://YOUR_PC_LAN_IP:8080`
+
+## Backend Setup
+
+1. Open `backend/`
+2. Copy `.env.example` to `.env`
+3. Add your server-side `GEMINI_API_KEY`
+4. Run:
+
+```bash
+npm install
+npm run start
+```
+
+Health check:
+
+- `GET http://localhost:8080/health`
+
+## Important
+
+- Rebuild and reinstall the APK after changing `.env`
+- For a real phone, `10.0.2.2` will not work. Use your computer's LAN IP instead.
+- Keep Gemini keys only in `backend/.env`, never in the Flutter app
