@@ -6,9 +6,65 @@ dotenv.config();
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
-const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
 const geminiModel =
   process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
+
+// Load all 4 API keys
+const GEMINI_API_KEYS = [
+  process.env.GEMINI_API_KEY?.trim(),
+  process.env.GEMINI_API_KEY_1?.trim(),
+  process.env.GEMINI_API_KEY_2?.trim(),
+  process.env.GEMINI_API_KEY_3?.trim(),
+].filter(Boolean); // Remove any undefined keys
+
+// API Key Manager - handles rotation and failover
+class ApiKeyManager {
+  constructor(keys) {
+    this.keys = keys;
+    this.currentIndex = 0;
+    this.keyStats = {};
+    keys.forEach((key, idx) => {
+      this.keyStats[idx] = { attempts: 0, failures: 0, lastUsed: null };
+    });
+  }
+
+  getNextKey() {
+    if (this.keys.length === 0) return null;
+    const key = this.keys[this.currentIndex];
+    this.keyStats[this.currentIndex].lastUsed = new Date();
+    return key;
+  }
+
+  rotateKey() {
+    this.currentIndex = (this.currentIndex + 1) % this.keys.length;
+  }
+
+  recordFailure(keyIndex) {
+    if (this.keyStats[keyIndex]) {
+      this.keyStats[keyIndex].failures++;
+    }
+  }
+
+  recordSuccess(keyIndex) {
+    if (this.keyStats[keyIndex]) {
+      this.keyStats[keyIndex].attempts++;
+    }
+  }
+
+  getStats() {
+    return this.keyStats;
+  }
+
+  getHealthStatus() {
+    return {
+      totalKeys: this.keys.length,
+      currentIndex: this.currentIndex,
+      stats: this.keyStats,
+    };
+  }
+}
+
+const keyManager = new ApiKeyManager(GEMINI_API_KEYS);
 
 const GEMINI_URL =
   `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`;
@@ -108,9 +164,9 @@ app.use(cors());
 app.use(express.json({ limit: '30mb' }));
 
 function requireGeminiKey() {
-  if (!geminiApiKey) {
+  if (GEMINI_API_KEYS.length === 0) {
     const error = new Error(
-      'Missing GEMINI_API_KEY in backend/.env. Copy backend/.env.example to backend/.env and add your server key.',
+      'Missing GEMINI_API_KEY in backend/.env. Copy backend/.env.example to backend/.env and add your server keys: GEMINI_API_KEY, GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3',
     );
     error.status = 500;
     throw error;
@@ -255,82 +311,132 @@ async function callGemini(parts, { maxOutputTokens = 4096 } = {}) {
   requireGeminiKey();
 
   let lastError;
+  const keysToTry = GEMINI_API_KEYS.length;
+  let keyAttempts = 0;
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const response = await fetch(`${GEMINI_URL}?key=${geminiApiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          temperature: 0.1,
-          topP: 0.95,
-          maxOutputTokens,
-        },
-      }),
-    });
+  // Try all keys with rotation
+  for (let keyAttempt = 0; keyAttempt < keysToTry; keyAttempt++) {
+    // For each key, try up to 3 times
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const currentKey = keyManager.getNextKey();
+      const currentKeyIndex = keyManager.currentIndex;
 
-    const text = await response.text();
-    let data = {};
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = {};
-    }
+      try {
+        const response = await fetch(`${GEMINI_URL}?key=${currentKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts }],
+            generationConfig: {
+              temperature: 0.1,
+              topP: 0.95,
+              maxOutputTokens,
+            },
+          }),
+        });
 
-    if (!response.ok) {
-      const message =
-        data?.error?.message ||
-        `Gemini request failed with status ${response.status}.`;
-      const error = new Error(message);
-      error.status = response.status;
+        const text = await response.text();
+        let data = {};
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = {};
+        }
 
-      const retryable =
-        response.status === 429 ||
-        response.status >= 500 ||
-        /high demand|overloaded|temporarily unavailable|resource exhausted/i.test(
-          message,
-        );
+        if (!response.ok) {
+          const message =
+            data?.error?.message ||
+            `Gemini request failed with status ${response.status}.`;
+          const error = new Error(message);
+          error.status = response.status;
 
-      if (retryable && attempt < 3) {
-        await delay(attempt * 2500);
+          // Check if this is a quota/rate limit error (try next key)
+          const isQuotaError =
+            response.status === 429 ||
+            response.status === 403 ||
+            /quota|rate limit|resource exhausted/i.test(message);
+
+          // Check if retryable (temp error, try again with same key)
+          const isRetryable =
+            response.status >= 500 ||
+            /overloaded|temporarily unavailable/i.test(message);
+
+          // If quota error, switch to next key
+          if (isQuotaError && keyAttempt < keysToTry - 1) {
+            console.log(
+              `[Key ${currentKeyIndex}] Quota/rate limit hit. Switching to next key...`,
+            );
+            keyManager.recordFailure(currentKeyIndex);
+            keyManager.rotateKey();
+            break; // Break inner loop to try next key
+          }
+
+          // If retryable, retry with same key
+          if (isRetryable && attempt < 3) {
+            console.log(
+              `[Key ${currentKeyIndex}] Attempt ${attempt}/3 failed (${response.status}). Retrying...`,
+            );
+            await delay(attempt * 2500);
+            lastError = error;
+            continue; // Continue inner loop to retry
+          }
+
+          // Not retryable, throw error
+          throw error;
+        }
+
+        const finishReason = data?.candidates?.[0]?.finishReason;
+        if (finishReason === 'SAFETY' || finishReason === 'RECITATION') {
+          const error = new Error(`Gemini blocked the request: ${finishReason}.`);
+          error.status = 422;
+          throw error;
+        }
+
+        const output = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!output) {
+          const error = new Error('Gemini returned an empty response.');
+          error.status = 502;
+          if (attempt < 3) {
+            await delay(attempt * 2000);
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+
+        // Success!
+        keyManager.recordSuccess(currentKeyIndex);
+        console.log(`[Key ${currentKeyIndex}] Request successful on attempt ${attempt}`);
+        return output.trim();
+      } catch (error) {
         lastError = error;
-        continue;
+        if (!error.status || (error.status !== 429 && error.status !== 403)) {
+          // Non-quota error, don't retry more keys
+          throw error;
+        }
       }
-
-      throw error;
     }
-
-    const finishReason = data?.candidates?.[0]?.finishReason;
-    if (finishReason === 'SAFETY' || finishReason === 'RECITATION') {
-      const error = new Error(`Gemini blocked the request: ${finishReason}.`);
-      error.status = 422;
-      throw error;
-    }
-
-    const output = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!output) {
-      const error = new Error('Gemini returned an empty response.');
-      error.status = 502;
-      if (attempt < 3) {
-        await delay(attempt * 2000);
-        lastError = error;
-        continue;
-      }
-      throw error;
-    }
-
-    return output.trim();
   }
 
-  throw lastError || new Error('Gemini request failed after multiple attempts.');
+  throw lastError || new Error('Gemini request failed after trying all keys.');
 }
 
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     backend: 'running',
-    geminiConfigured: Boolean(geminiApiKey),
+    geminiConfigured: GEMINI_API_KEYS.length > 0,
+    apiKeysAvailable: GEMINI_API_KEYS.length,
+    keyStats: keyManager.getStats(),
+  });
+});
+
+app.get('/api-keys-status', (_req, res) => {
+  res.json({
+    ok: true,
+    totalKeys: GEMINI_API_KEYS.length,
+    currentKeyIndex: keyManager.currentIndex,
+    keyStats: keyManager.getStats(),
   });
 });
 

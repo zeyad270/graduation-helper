@@ -1020,6 +1020,26 @@ class _OCRHomePageState extends State<OCRHomePage>
           if (isEditing) ...[_editBanner(), const SizedBox(height: 16)],
 
           if (!isEditing) ...[
+            // ── Header: New Project Entry ───────────────────────────────────
+            const Text(
+              'New Project Entry',
+              style: TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.5,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Organize your research with precision.\nUse AI-assisted extraction to speed up your workflow.',
+              style: TextStyle(
+                fontSize: 14,
+                color: _M3.onSurfaceVariant,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 24),
+
             _sectionHeader('Pages', Icons.document_scanner_rounded),
             _docsGrid(),
             const SizedBox(height: 12),
@@ -1526,30 +1546,78 @@ class _OCRHomePageState extends State<OCRHomePage>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: _addPageBtn(
-                Icons.camera_alt_rounded,
-                'Camera',
-                _M3.primary,
-                () => _pickDocuments(ImageSource.camera),
+        if (_scannedDocs.isEmpty) ...[
+          // Empty state with large frame
+          Container(
+            height: 240,
+            decoration: BoxDecoration(
+              color: _M3.surfaceVariant.withOpacity(0.5),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: _M3.outlineVariant, width: 2),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      color: _M3.primaryContainer,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Icon(
+                      Icons.document_scanner_rounded,
+                      size: 32,
+                      color: _M3.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Position your document within',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: _M3.onSurfaceVariant,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  Text(
+                    'the frame to start auto-extract.',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: _M3.onSurfaceVariant,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _addPageBtn(
-                Icons.photo_library_rounded,
-                'Gallery',
-                _M3.secondary,
-                () => _pickDocuments(ImageSource.gallery),
+          ),
+          const SizedBox(height: 16),
+          // Buttons
+          Row(
+            children: [
+              Expanded(
+                child: _addPageBtn(
+                  Icons.camera_alt_rounded,
+                  'Scan',
+                  _M3.primary,
+                  () => _pickDocuments(ImageSource.camera),
+                ),
               ),
-            ),
-          ],
-        ),
-
-        if (_scannedDocs.isNotEmpty) ...[
-          const SizedBox(height: 14),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _addPageBtn(
+                  Icons.photo_library_rounded,
+                  'Gallery',
+                  _M3.secondary,
+                  () => _pickDocuments(ImageSource.gallery),
+                ),
+              ),
+            ],
+          ),
+        ] else ...[
+          // Show added documents grid
           GridView.builder(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
@@ -1562,26 +1630,21 @@ class _OCRHomePageState extends State<OCRHomePage>
             itemCount: _scannedDocs.length,
             itemBuilder: (_, i) => _imageTile(i),
           ),
-        ] else
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 24),
-            child: Center(
-              child: Column(
-                children: [
-                  Icon(
-                    Icons.add_photo_alternate_outlined,
-                    size: 48,
-                    color: _M3.outlineVariant,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Add document pages to scan',
-                    style: TextStyle(color: _M3.outline, fontSize: 13),
-                  ),
-                ],
+          const SizedBox(height: 12),
+          // Add more button when docs exist
+          Row(
+            children: [
+              Expanded(
+                child: _addPageBtn(
+                  Icons.add_a_photo_rounded,
+                  'Add More',
+                  _M3.primary,
+                  () => _pickDocuments(ImageSource.camera),
+                ),
               ),
-            ),
+            ],
           ),
+        ],
       ],
     );
   }
@@ -1602,27 +1665,27 @@ class _OCRHomePageState extends State<OCRHomePage>
           padding: const EdgeInsets.symmetric(vertical: 14),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: color.withOpacity(0.3)),
+            border: Border.all(color: color.withOpacity(0.3), width: 1.5),
           ),
-          child: Row(
+          child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Container(
-                width: 32,
-                height: 32,
+                width: 40,
+                height: 40,
                 decoration: BoxDecoration(
                   color: color,
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Icon(icon, color: Colors.white, size: 17),
+                child: Icon(icon, color: Colors.white, size: 20),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(height: 8),
               Text(
                 label,
                 style: TextStyle(
                   color: color,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],

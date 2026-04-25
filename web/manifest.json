@@ -1,11 +1,11 @@
 {
-    "name": "grad_ocr_hive",
-    "short_name": "grad_ocr_hive",
+    "name": "InnoTrack Helper",
+    "short_name": "InnoTrack Helper",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#F7F8FF",
+    "theme_color": "#4355B9",
+    "description": "Graduation project assistant for scanning, extraction, and organization.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
