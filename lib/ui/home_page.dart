@@ -874,19 +874,170 @@ class _OCRHomePageState extends State<OCRHomePage>
       ),
       child: Scaffold(
         backgroundColor: _M3.background,
-        appBar: _buildAppBar(isEditing, unsyncedCount),
-        body: TabBarView(
-          controller: _tabController,
-          children: [
-            _buildFormTab(isEditing),
-            _buildDocsTab(),
-            _buildProjectsTab(),
-          ],
+        body: SafeArea(
+          child: Column(
+            children: [
+              _buildTopBar(isEditing),
+              Expanded(
+                child: TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _buildFormTab(isEditing),
+                    _buildDocsTab(),
+                    _buildProjectsTab(),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
+        bottomNavigationBar: _buildFloatingNav(),
         floatingActionButton: _currentIndex == 2 && unsyncedCount > 0
             ? _buildSyncFab(unsyncedCount)
             : null,
         floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+      ),
+    );
+  }
+
+  Widget _buildTopBar(bool isEditing) {
+    return Container(
+      color: _M3.surface,
+      padding: const EdgeInsets.fromLTRB(18, 10, 14, 8),
+      child: Row(
+        children: [
+          if (!isEditing) ...[
+            Icon(
+              Icons.auto_awesome_rounded,
+              size: 15,
+              color: _M3.aiAccent,
+            ),
+            const SizedBox(width: 6),
+          ],
+          Expanded(
+            child: Text(
+              isEditing ? 'Edit Project' : 'InnoTrack',
+              style: TextStyle(
+                color: isEditing ? _M3.onSurface : _M3.primary,
+                fontWeight: FontWeight.w800,
+                fontSize: 18,
+                letterSpacing: -0.4,
+              ),
+            ),
+          ),
+          IconButton(
+            icon: Icon(
+              isEditing
+                  ? Icons.close_rounded
+                  : _currentIndex == 2
+                  ? Icons.delete_sweep_rounded
+                  : Icons.refresh_rounded,
+              color: _M3.onSurface,
+            ),
+            tooltip: isEditing
+                ? 'Cancel edit'
+                : _currentIndex == 2
+                ? 'Delete all projects'
+                : 'Clear form',
+            onPressed: () async {
+              if (isEditing) {
+                _clearForm();
+                return;
+              }
+              if (_currentIndex == 2) {
+                if (await _confirm('Delete All', 'This cannot be undone.')) {
+                  for (final p in _projects) {
+                    if (p.id != null) {
+                      await DatabaseService.deleteProject(p.id!);
+                    }
+                  }
+                  _loadProjects();
+                  _showSnack(
+                    'All projects deleted',
+                    type: _SnackType.success,
+                  );
+                }
+                return;
+              }
+              if (await _confirm('Clear Form', 'Reset all fields?')) {
+                _clearForm();
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFloatingNav() {
+    const items = [
+      (Icons.edit_note_rounded, 'Form'),
+      (Icons.document_scanner_rounded, 'Assets'),
+      (Icons.folder_rounded, 'Archive'),
+    ];
+
+    return SafeArea(
+      minimum: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+      child: Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: _M3.surface,
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: _M3.shadow,
+              blurRadius: 24,
+              offset: const Offset(0, 10),
+            ),
+          ],
+          border: Border.all(color: _M3.outlineVariant.withOpacity(0.55)),
+        ),
+        child: Row(
+          children: List.generate(items.length, (index) {
+            final selected = _currentIndex == index;
+            final item = items[index];
+            return Expanded(
+              child: GestureDetector(
+                onTap: () => _tabController.animateTo(index),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  decoration: BoxDecoration(
+                    gradient: selected
+                        ? const LinearGradient(
+                            colors: [Color(0xFF5B4CF4), Color(0xFF6B52AE)],
+                          )
+                        : null,
+                    color: selected ? null : Colors.transparent,
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        item.$1,
+                        size: 18,
+                        color: selected ? Colors.white : _M3.onSurfaceVariant,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        item.$2,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: selected
+                              ? Colors.white
+                              : _M3.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }),
+        ),
       ),
     );
   }
@@ -1013,7 +1164,7 @@ class _OCRHomePageState extends State<OCRHomePage>
 
   Widget _buildFormTab(bool isEditing) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+      padding: const EdgeInsets.fromLTRB(18, 8, 18, 120),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1024,22 +1175,41 @@ class _OCRHomePageState extends State<OCRHomePage>
             const Text(
               'New Project Entry',
               style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.5,
+                fontSize: 26,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.7,
               ),
+              textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             Text(
               'Organize your research with precision.\nUse AI-assisted extraction to speed up your workflow.',
               style: TextStyle(
-                fontSize: 14,
+                fontSize: 13.5,
                 color: _M3.onSurfaceVariant,
                 height: 1.5,
               ),
+              textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
 
+            Container(
+              decoration: BoxDecoration(
+                color: _M3.surface,
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: _M3.outlineVariant.withOpacity(0.55)),
+                boxShadow: [
+                  BoxShadow(
+                    color: _M3.shadow,
+                    blurRadius: 22,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
             _sectionHeader('Pages', Icons.document_scanner_rounded),
             _docsGrid(),
             const SizedBox(height: 12),
@@ -1052,6 +1222,9 @@ class _OCRHomePageState extends State<OCRHomePage>
               _extractionSummaryCard(),
             ],
             const SizedBox(height: 24),
+                ],
+              ),
+            ),
           ],
 
           // ── Summary Card ─────────────────────────────────────────────────────
@@ -1547,36 +1720,35 @@ class _OCRHomePageState extends State<OCRHomePage>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (_scannedDocs.isEmpty) ...[
-          // Empty state with large frame
           Container(
-            height: 240,
+            height: 160,
             decoration: BoxDecoration(
-              color: _M3.surfaceVariant.withOpacity(0.5),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: _M3.outlineVariant, width: 2),
+              color: _M3.surfaceVariant.withOpacity(0.65),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: _M3.outlineVariant.withOpacity(0.8)),
             ),
             child: Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Container(
-                    width: 64,
-                    height: 64,
+                    width: 44,
+                    height: 44,
                     decoration: BoxDecoration(
                       color: _M3.primaryContainer,
-                      borderRadius: BorderRadius.circular(16),
+                      borderRadius: BorderRadius.circular(14),
                     ),
                     child: Icon(
                       Icons.document_scanner_rounded,
-                      size: 32,
+                      size: 22,
                       color: _M3.primary,
                     ),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 14),
                   Text(
                     'Position your document within',
                     style: TextStyle(
-                      fontSize: 14,
+                      fontSize: 12.5,
                       color: _M3.onSurfaceVariant,
                       fontWeight: FontWeight.w500,
                     ),
@@ -1584,7 +1756,7 @@ class _OCRHomePageState extends State<OCRHomePage>
                   Text(
                     'the frame to start auto-extract.',
                     style: TextStyle(
-                      fontSize: 14,
+                      fontSize: 12.5,
                       color: _M3.onSurfaceVariant,
                       fontWeight: FontWeight.w500,
                     ),
@@ -1656,36 +1828,36 @@ class _OCRHomePageState extends State<OCRHomePage>
     VoidCallback onTap,
   ) {
     return Material(
-      color: color.withOpacity(0.08),
-      borderRadius: BorderRadius.circular(14),
+      color: _M3.surface,
+      borderRadius: BorderRadius.circular(16),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(16),
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: color.withOpacity(0.3), width: 1.5),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: _M3.outlineVariant.withOpacity(0.85)),
           ),
-          child: Column(
+          child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Container(
-                width: 40,
-                height: 40,
+                width: 28,
+                height: 28,
                 decoration: BoxDecoration(
-                  color: color,
-                  borderRadius: BorderRadius.circular(10),
+                  color: color.withOpacity(0.14),
+                  borderRadius: BorderRadius.circular(8),
                 ),
-                child: Icon(icon, color: Colors.white, size: 20),
+                child: Icon(icon, color: color, size: 15),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(width: 8),
               Text(
                 label,
                 style: TextStyle(
-                  color: color,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
+                  color: _M3.onSurface,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
             ],
@@ -1879,34 +2051,20 @@ class _OCRHomePageState extends State<OCRHomePage>
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       decoration: BoxDecoration(
-        gradient: hasPages
-            ? const LinearGradient(
-                colors: [Color(0xFF4355B9), Color(0xFF6B52AE)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              )
-            : null,
-        color: hasPages ? null : _M3.surfaceVariant,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: hasPages
-            ? [
-                BoxShadow(
-                  color: _M3.primary.withOpacity(0.35),
-                  blurRadius: 18,
-                  offset: const Offset(0, 8),
-                ),
-              ]
-            : null,
+        color: hasPages
+            ? _M3.surfaceVariant.withOpacity(0.72)
+            : _M3.surfaceVariant,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _M3.outlineVariant.withOpacity(0.65)),
       ),
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(18),
         child: InkWell(
           onTap: (!hasPages || _isProcessing) ? null : _aiExtractAll,
-          borderRadius: BorderRadius.circular(20),
-          splashColor: Colors.white12,
+          borderRadius: BorderRadius.circular(18),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
             child: _isProcessing
                 ? Column(
                     children: [
@@ -1917,7 +2075,7 @@ class _OCRHomePageState extends State<OCRHomePage>
                             height: 20,
                             child: CircularProgressIndicator(
                               strokeWidth: 2.5,
-                              color: Colors.white,
+                              color: _M3.primary,
                             ),
                           ),
                           const SizedBox(width: 14),
@@ -1925,7 +2083,7 @@ class _OCRHomePageState extends State<OCRHomePage>
                             child: Text(
                               _processingStep,
                               style: const TextStyle(
-                                color: Colors.white,
+                                color: _M3.onSurface,
                                 fontWeight: FontWeight.w600,
                                 fontSize: 14,
                               ),
@@ -1935,7 +2093,7 @@ class _OCRHomePageState extends State<OCRHomePage>
                           Text(
                             '${(_processingProgress * 100).round()}%',
                             style: const TextStyle(
-                              color: Colors.white70,
+                              color: _M3.onSurfaceVariant,
                               fontSize: 13,
                               fontWeight: FontWeight.w700,
                             ),
@@ -1947,9 +2105,9 @@ class _OCRHomePageState extends State<OCRHomePage>
                         borderRadius: BorderRadius.circular(6),
                         child: LinearProgressIndicator(
                           value: _processingProgress,
-                          backgroundColor: Colors.white24,
+                          backgroundColor: _M3.outlineVariant,
                           valueColor: const AlwaysStoppedAnimation(
-                            Colors.white,
+                            _M3.primary,
                           ),
                           minHeight: 4,
                         ),
@@ -1959,30 +2117,31 @@ class _OCRHomePageState extends State<OCRHomePage>
                 : Row(
                     children: [
                       Container(
-                        width: 44,
-                        height: 44,
+                        width: 34,
+                        height: 34,
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(hasPages ? 0.18 : 0),
-                          borderRadius: BorderRadius.circular(12),
+                          color: hasPages
+                              ? _M3.primary.withOpacity(0.08)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(10),
                         ),
                         child: Icon(
                           Icons.auto_awesome_rounded,
-                          color: hasPages ? Colors.white : _M3.outline,
-                          size: 22,
+                          color: hasPages ? _M3.primary : _M3.outline,
+                          size: 18,
                         ),
                       ),
-                      const SizedBox(width: 14),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Extract All Fields',
+                              'Process with AI',
                               style: TextStyle(
-                                color: hasPages ? Colors.white : _M3.outline,
+                                color: hasPages ? _M3.onSurface : _M3.outline,
                                 fontWeight: FontWeight.w800,
-                                fontSize: 16,
-                                letterSpacing: -0.2,
+                                fontSize: 15,
                               ),
                             ),
                             const SizedBox(height: 2),
@@ -1992,7 +2151,7 @@ class _OCRHomePageState extends State<OCRHomePage>
                                   : 'Add pages above first',
                               style: TextStyle(
                                 color: hasPages
-                                    ? Colors.white.withOpacity(0.72)
+                                    ? _M3.onSurfaceVariant
                                     : _M3.outline.withOpacity(0.6),
                                 fontSize: 12,
                                 fontWeight: FontWeight.w500,
@@ -2004,21 +2163,19 @@ class _OCRHomePageState extends State<OCRHomePage>
                       if (hasPages)
                         Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 7,
+                            horizontal: 12,
+                            vertical: 6,
                           ),
                           decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.18),
-                            borderRadius: BorderRadius.circular(30),
-                            border: Border.all(color: Colors.white24),
+                            color: _M3.primary.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(24),
                           ),
-                          child: const Text(
-                            'GO',
+                          child: Text(
+                            'Run',
                             style: TextStyle(
-                              color: Colors.white,
+                              color: _M3.primary,
                               fontSize: 12,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1.5,
+                              fontWeight: FontWeight.w800,
                             ),
                           ),
                         ),

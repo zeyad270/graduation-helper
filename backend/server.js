@@ -6,68 +6,129 @@ dotenv.config();
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
-const geminiModel =
-  process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
+const GEMINI_MODELS = (
+  process.env.GEMINI_MODELS?.trim() ||
+  process.env.GEMINI_MODEL?.trim() ||
+  'gemini-3.1-flash-lite-preview'
+)
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
 
-// Load all 4 API keys
 const GEMINI_API_KEYS = [
   process.env.GEMINI_API_KEY?.trim(),
   process.env.GEMINI_API_KEY_1?.trim(),
   process.env.GEMINI_API_KEY_2?.trim(),
   process.env.GEMINI_API_KEY_3?.trim(),
-].filter(Boolean); // Remove any undefined keys
+].filter(Boolean);
 
-// API Key Manager - handles rotation and failover
 class ApiKeyManager {
   constructor(keys) {
     this.keys = keys;
-    this.currentIndex = 0;
     this.keyStats = {};
     keys.forEach((key, idx) => {
-      this.keyStats[idx] = { attempts: 0, failures: 0, lastUsed: null };
+      this.keyStats[idx] = {
+        attempts: 0,
+        failures: 0,
+        successes: 0,
+        lastUsed: null,
+        cooldownUntil: null,
+        lastError: null,
+      };
     });
   }
 
-  getNextKey() {
+  getAvailableKeyIndexes() {
+    const now = Date.now();
+    return this.keys
+      .map((_, index) => index)
+      .filter((index) => {
+        const cooldownUntil = this.keyStats[index]?.cooldownUntil;
+        return !cooldownUntil || cooldownUntil <= now;
+      });
+  }
+
+  getNextKeyIndex() {
+    const available = this.getAvailableKeyIndexes();
+    if (available.length > 0) {
+      available.sort((a, b) => {
+        const aUsed = this.keyStats[a].lastUsed
+          ? new Date(this.keyStats[a].lastUsed).getTime()
+          : 0;
+        const bUsed = this.keyStats[b].lastUsed
+          ? new Date(this.keyStats[b].lastUsed).getTime()
+          : 0;
+        return aUsed - bUsed;
+      });
+      return available[0];
+    }
+
     if (this.keys.length === 0) return null;
-    const key = this.keys[this.currentIndex];
-    this.keyStats[this.currentIndex].lastUsed = new Date();
-    return key;
+
+    let earliestIndex = 0;
+    let earliestTime = Number.POSITIVE_INFINITY;
+    for (const [indexText, stats] of Object.entries(this.keyStats)) {
+      const index = Number(indexText);
+      const cooldown = stats.cooldownUntil ?? 0;
+      if (cooldown < earliestTime) {
+        earliestTime = cooldown;
+        earliestIndex = index;
+      }
+    }
+    return earliestIndex;
   }
 
-  rotateKey() {
-    this.currentIndex = (this.currentIndex + 1) % this.keys.length;
+  getKey(index) {
+    if (index == null) return null;
+    this.keyStats[index].lastUsed = new Date().toISOString();
+    this.keyStats[index].attempts++;
+    return this.keys[index];
   }
 
-  recordFailure(keyIndex) {
+  setCooldown(keyIndex, ms, message = 'Rate limited') {
     if (this.keyStats[keyIndex]) {
       this.keyStats[keyIndex].failures++;
+      this.keyStats[keyIndex].lastError = message;
+      this.keyStats[keyIndex].cooldownUntil = Date.now() + ms;
     }
   }
 
   recordSuccess(keyIndex) {
     if (this.keyStats[keyIndex]) {
-      this.keyStats[keyIndex].attempts++;
+      this.keyStats[keyIndex].successes++;
+      this.keyStats[keyIndex].lastError = null;
+      this.keyStats[keyIndex].cooldownUntil = null;
     }
   }
 
-  getStats() {
-    return this.keyStats;
+  recordFailure(keyIndex, message = 'Request failed') {
+    if (this.keyStats[keyIndex]) {
+      this.keyStats[keyIndex].failures++;
+      this.keyStats[keyIndex].lastError = message;
+    }
+  }
+
+  getSoonestCooldownRemainingMs() {
+    const now = Date.now();
+    const future = Object.values(this.keyStats)
+      .map((stats) => stats.cooldownUntil ?? 0)
+      .filter((time) => time > now);
+
+    if (future.length === 0) return 0;
+    return Math.min(...future) - now;
   }
 
   getHealthStatus() {
     return {
       totalKeys: this.keys.length,
-      currentIndex: this.currentIndex,
+      availableKeysNow: this.getAvailableKeyIndexes().length,
+      cooldownRemainingMs: this.getSoonestCooldownRemainingMs(),
       stats: this.keyStats,
     };
   }
 }
 
 const keyManager = new ApiKeyManager(GEMINI_API_KEYS);
-
-const GEMINI_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`;
 
 const ALL_KEYS = [
   'title',
@@ -187,6 +248,39 @@ function sanitizeText(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getGeminiUrl(model) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+}
+
+function parseRetryDelayMs(message = '') {
+  const secondsMatch = message.match(/Please retry in ([\d.]+)s/i);
+  if (secondsMatch) return Math.ceil(Number(secondsMatch[1]) * 1000);
+
+  const minuteMatch = message.match(/retry in ([\d.]+) minutes?/i);
+  if (minuteMatch) return Math.ceil(Number(minuteMatch[1]) * 60 * 1000);
+
+  return null;
+}
+
+function isDailyQuotaMessage(message = '') {
+  return /requests per day|rpd|daily quota|midnight pacific/i.test(message);
+}
+
+function formatQuotaError(message, waitMs) {
+  const waitSeconds = Math.ceil(waitMs / 1000);
+  const waitMinutes = Math.ceil(waitSeconds / 60);
+
+  if (isDailyQuotaMessage(message)) {
+    return `${message}\nThis looks like a daily project quota issue, so waiting one minute will not fix it. You need a different Google project, a lower-usage model, or billing enabled.`;
+  }
+
+  if (waitSeconds >= 60) {
+    return `${message}\nAll configured keys are cooling down right now. Earliest retry is about ${waitMinutes} minute(s).`;
+  }
+
+  return `${message}\nAll configured keys are cooling down right now. Earliest retry is about ${waitSeconds} second(s).`;
 }
 
 function score(value, key) {
@@ -311,111 +405,111 @@ async function callGemini(parts, { maxOutputTokens = 4096 } = {}) {
   requireGeminiKey();
 
   let lastError;
-  const keysToTry = GEMINI_API_KEYS.length;
-  let keyAttempts = 0;
+  const maxAttempts = GEMINI_API_KEYS.length * GEMINI_MODELS.length;
 
-  // Try all keys with rotation
-  for (let keyAttempt = 0; keyAttempt < keysToTry; keyAttempt++) {
-    // For each key, try up to 3 times
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const currentKey = keyManager.getNextKey();
-      const currentKeyIndex = keyManager.currentIndex;
+  for (let overallAttempt = 0; overallAttempt < maxAttempts; overallAttempt++) {
+    const keyIndex = keyManager.getNextKeyIndex();
+    const apiKey = keyManager.getKey(keyIndex);
+    const model = GEMINI_MODELS[overallAttempt % GEMINI_MODELS.length];
 
+    if (!apiKey || !model) break;
+
+    try {
+      const response = await fetch(`${getGeminiUrl(model)}?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: {
+            temperature: 0.1,
+            topP: 0.95,
+            maxOutputTokens,
+          },
+        }),
+      });
+
+      const text = await response.text();
+      let data = {};
       try {
-        const response = await fetch(`${GEMINI_URL}?key=${currentKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts }],
-            generationConfig: {
-              temperature: 0.1,
-              topP: 0.95,
-              maxOutputTokens,
-            },
-          }),
-        });
+        data = JSON.parse(text);
+      } catch {
+        data = {};
+      }
 
-        const text = await response.text();
-        let data = {};
-        try {
-          data = JSON.parse(text);
-        } catch {
-          data = {};
+      if (!response.ok) {
+        const message =
+          data?.error?.message ||
+          `Gemini request failed with status ${response.status}.`;
+        const error = new Error(message);
+        error.status = response.status;
+
+        const quotaLike =
+          response.status === 429 ||
+          response.status === 403 ||
+          /quota|rate limit|resource exhausted|exceeded your current quota/i.test(
+            message,
+          );
+
+        const retryable =
+          response.status >= 500 ||
+          /overloaded|temporarily unavailable|high demand/i.test(message);
+
+        if (quotaLike) {
+          const waitMs = parseRetryDelayMs(message) ?? 65 * 1000;
+          keyManager.setCooldown(keyIndex, waitMs, message);
+          console.log(
+            `[Key ${keyIndex}] quota/cooldown on model ${model}. Cooling for ${waitMs}ms`,
+          );
+          lastError = error;
+          continue;
         }
 
-        if (!response.ok) {
-          const message =
-            data?.error?.message ||
-            `Gemini request failed with status ${response.status}.`;
-          const error = new Error(message);
-          error.status = response.status;
-
-          // Check if this is a quota/rate limit error (try next key)
-          const isQuotaError =
-            response.status === 429 ||
-            response.status === 403 ||
-            /quota|rate limit|resource exhausted/i.test(message);
-
-          // Check if retryable (temp error, try again with same key)
-          const isRetryable =
-            response.status >= 500 ||
-            /overloaded|temporarily unavailable/i.test(message);
-
-          // If quota error, switch to next key
-          if (isQuotaError && keyAttempt < keysToTry - 1) {
-            console.log(
-              `[Key ${currentKeyIndex}] Quota/rate limit hit. Switching to next key...`,
-            );
-            keyManager.recordFailure(currentKeyIndex);
-            keyManager.rotateKey();
-            break; // Break inner loop to try next key
-          }
-
-          // If retryable, retry with same key
-          if (isRetryable && attempt < 3) {
-            console.log(
-              `[Key ${currentKeyIndex}] Attempt ${attempt}/3 failed (${response.status}). Retrying...`,
-            );
-            await delay(attempt * 2500);
-            lastError = error;
-            continue; // Continue inner loop to retry
-          }
-
-          // Not retryable, throw error
-          throw error;
+        if (retryable) {
+          keyManager.recordFailure(keyIndex, message);
+          await delay(2500);
+          lastError = error;
+          continue;
         }
 
-        const finishReason = data?.candidates?.[0]?.finishReason;
-        if (finishReason === 'SAFETY' || finishReason === 'RECITATION') {
-          const error = new Error(`Gemini blocked the request: ${finishReason}.`);
-          error.status = 422;
-          throw error;
-        }
+        keyManager.recordFailure(keyIndex, message);
+        throw error;
+      }
 
-        const output = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!output) {
-          const error = new Error('Gemini returned an empty response.');
-          error.status = 502;
-          if (attempt < 3) {
-            await delay(attempt * 2000);
-            lastError = error;
-            continue;
-          }
-          throw error;
-        }
+      const finishReason = data?.candidates?.[0]?.finishReason;
+      if (finishReason === 'SAFETY' || finishReason === 'RECITATION') {
+        const error = new Error(`Gemini blocked the request: ${finishReason}.`);
+        error.status = 422;
+        keyManager.recordFailure(keyIndex, error.message);
+        throw error;
+      }
 
-        // Success!
-        keyManager.recordSuccess(currentKeyIndex);
-        console.log(`[Key ${currentKeyIndex}] Request successful on attempt ${attempt}`);
-        return output.trim();
-      } catch (error) {
+      const output = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!output) {
+        const error = new Error('Gemini returned an empty response.');
+        error.status = 502;
+        keyManager.recordFailure(keyIndex, error.message);
         lastError = error;
-        if (!error.status || (error.status !== 429 && error.status !== 403)) {
-          // Non-quota error, don't retry more keys
-          throw error;
-        }
+        continue;
+      }
+
+      keyManager.recordSuccess(keyIndex);
+      console.log(`[Key ${keyIndex}] model ${model} request succeeded.`);
+      return output.trim();
+    } catch (error) {
+      lastError = error;
+      if (!error.status || ![403, 429, 500, 502, 503].includes(error.status)) {
+        throw error;
       }
     }
+  }
+
+  const cooldownMs = keyManager.getSoonestCooldownRemainingMs();
+  if (cooldownMs > 0) {
+    const baseMessage =
+      lastError?.message || 'All Gemini keys are temporarily rate limited.';
+    const error = new Error(formatQuotaError(baseMessage, cooldownMs));
+    error.status = lastError?.status || 429;
+    throw error;
   }
 
   throw lastError || new Error('Gemini request failed after trying all keys.');
@@ -427,7 +521,8 @@ app.get('/health', (_req, res) => {
     backend: 'running',
     geminiConfigured: GEMINI_API_KEYS.length > 0,
     apiKeysAvailable: GEMINI_API_KEYS.length,
-    keyStats: keyManager.getStats(),
+    modelsConfigured: GEMINI_MODELS,
+    keyStatus: keyManager.getHealthStatus(),
   });
 });
 
@@ -435,8 +530,8 @@ app.get('/api-keys-status', (_req, res) => {
   res.json({
     ok: true,
     totalKeys: GEMINI_API_KEYS.length,
-    currentKeyIndex: keyManager.currentIndex,
-    keyStats: keyManager.getStats(),
+    modelsConfigured: GEMINI_MODELS,
+    keyStatus: keyManager.getHealthStatus(),
   });
 });
 
